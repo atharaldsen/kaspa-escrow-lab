@@ -2,34 +2,35 @@
 name = "kaspa-escrow-lab"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 description = "Experimental escrow and covenant patterns on Kaspa Testnet 12"
 license = "MIT"
 
 [dependencies]
-# Kaspa core crates for covenant/script experimentation
-kaspa-txscript = "1.1.0-rc.2"
-kaspa-consensus-core = "1.1.0-rc.2"
-kaspa-addresses = "1.1.0-rc.2"
-kaspa-hashes = "1.1.0-rc.2"
+# Kaspa core crates - from the tn12 branch (covenant/KIP-10/KIP-17 support)
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
 
 # For RPC connection to testnet
-kaspa-wrpc-client = "1.1.0-rc.2"
-kaspa-rpc-core = "1.1.0-rc.2"
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Cryptography
-secp256k1 = { version = "0.29", features = ["rand"] }
+# Cryptography (match rusty-kaspa's versions)
+secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
 rand = "0.8"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Error handling
-thiserror = "2"
+# Error handling (thiserror 1.x to match rusty-kaspa)
+thiserror = "1"
 anyhow = "1"
 
 # Hex encoding
@@ -46,3 +47,11 @@ path = "examples/multisig_escrow.rs"
 [[example]]
 name = "timelock_escrow"
 path = "examples/timelock_escrow.rs"
+
+[[example]]
+name = "covenant_escrow"
+path = "examples/covenant_escrow.rs"
+
+[[example]]
+name = "amount_constrained_escrow"
+path = "examples/amount_constrained_escrow.rs"
