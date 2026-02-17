@@ -55,3 +55,11 @@ path = "examples/covenant_escrow.rs"
 [[example]]
 name = "amount_constrained_escrow"
 path = "examples/amount_constrained_escrow.rs"
+
+[[example]]
+name = "connect_test"
+path = "examples/connect_test.rs"
+
+[[example]]
+name = "live_escrow"
+path = "examples/live_escrow.rs"
