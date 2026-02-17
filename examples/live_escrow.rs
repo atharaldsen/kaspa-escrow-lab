@@ -12,23 +12,13 @@
 //! Requires kaspad running with:
 //!   --rpclisten-borsh=127.0.0.1:17110 --utxoindex --enable-unsynced-mining
 
-use kaspa_consensus_core::{
-    hashing::{
-        sighash::{SigHashReusedValuesUnsync, calc_schnorr_signature_hash},
-        sighash_type::SIG_HASH_ALL,
-    },
-    tx::{
-        MutableTransaction, Transaction, TransactionInput, TransactionOutpoint,
-        TransactionOutput,
-    },
+use kaspa_consensus_core::tx::{
+    Transaction, TransactionInput, TransactionOutpoint, TransactionOutput,
 };
 use kaspa_escrow_lab::*;
 use kaspa_rpc_core::RpcTransaction;
 use kaspa_txscript::{
-    opcodes::codes::OpData65,
-    pay_to_address_script, pay_to_script_hash_script,
-    script_builder::ScriptBuilder,
-    standard::multisig_redeem_script,
+    pay_to_address_script, pay_to_script_hash_script, standard::multisig_redeem_script,
 };
 use kaspa_wrpc_client::prelude::*;
 use std::time::Duration;
@@ -46,7 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         None,
     )?;
-    client.connect(None).await?;
+    client.connect(None).await.map_err(|e| {
+        format!("Failed to connect to TN12 node at ws://127.0.0.1:17110: {e}\n  Is kaspad running with --rpclisten-borsh=127.0.0.1:17110?")
+    })?;
 
     let info = client.get_block_dag_info().await?;
     println!("  Connected! Network: {}, DAA: {}", info.network, info.virtual_daa_score);
@@ -74,6 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  (In wallet: transfer {})", buyer_addr);
     println!();
 
+    let max_wait = Duration::from_secs(300);
+    let start = std::time::Instant::now();
     let (outpoint, utxo_amount) = loop {
         let utxos = client
             .get_utxos_by_addresses(vec![buyer_addr.clone()])
@@ -86,12 +80,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Found UTXO: {} sompi (tx: {})", entry.utxo_entry.amount, entry.outpoint.transaction_id);
             break (op, entry.utxo_entry.amount);
         }
+        if start.elapsed() > max_wait {
+            return Err("Timed out after 5 minutes waiting for funds. Send test KAS and try again.".into());
+        }
+        eprint!(".");
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
 
     // Step 5: Build and submit funding transaction (buyer → escrow P2SH)
     print_step(5, "Building escrow funding transaction...");
     let fee: u64 = 5000;
+    if utxo_amount <= fee {
+        return Err(format!("UTXO too small: {} sompi (need > {} for fee)", utxo_amount, fee).into());
+    }
     let escrow_amount = utxo_amount - fee;
     println!("  Input:  {} sompi", utxo_amount);
     println!("  Escrow: {} sompi", escrow_amount);
@@ -123,28 +124,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let funding_utxo =
         kaspa_consensus_core::tx::UtxoEntry::new(utxo_amount, buyer_spk, 0, false, None);
 
-    let reused_values = SigHashReusedValuesUnsync::new();
-    let mtx = MutableTransaction::with_entries(funding_tx.clone(), vec![funding_utxo.clone()]);
-    let sig_hash =
-        calc_schnorr_signature_hash(&mtx.as_verifiable(), 0, SIG_HASH_ALL, &reused_values);
-    let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice())?;
-    let sig = buyer_kp.sign_schnorr(msg);
-    let mut signature = Vec::with_capacity(65);
-    signature.extend_from_slice(sig.as_ref().as_slice());
-    signature.push(SIG_HASH_ALL.to_u8());
-
-    // For P2PK, sig_script is just: <sig_data_65>
-    let mut sig_script = Vec::new();
-    sig_script.push(OpData65);
-    sig_script.extend_from_slice(&signature);
+    let signature = schnorr_sign(&funding_tx, &funding_utxo, &buyer_kp);
+    let sig_script = build_p2pk_sig_script(&signature);
 
     let mut signed_funding_tx = funding_tx;
     signed_funding_tx.inputs[0].signature_script = sig_script;
 
     // Verify locally before submitting
-    let verify_result = verify_script(&signed_funding_tx, &funding_utxo);
-    println!("  Local verify: {:?}", verify_result);
-    assert!(verify_result.is_ok(), "Funding tx should verify locally");
+    verify_script(&signed_funding_tx, &funding_utxo)
+        .map_err(|e| format!("Funding tx failed local verification: {e}"))?;
+    println!("  Local verify: OK");
 
     // Submit
     let rpc_tx: RpcTransaction = (&signed_funding_tx).into();
@@ -161,6 +150,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Step 7: Build and submit release transaction (escrow → seller)
     print_step(7, "Building release transaction...");
     let release_fee: u64 = 5000;
+    if escrow_amount <= release_fee {
+        return Err(format!("Escrow too small: {} sompi (need > {} for fee)", escrow_amount, release_fee).into());
+    }
     let release_amount = escrow_amount - release_fee;
     println!("  Escrow input: {} sompi", escrow_amount);
     println!("  To seller:    {} sompi", release_amount);
@@ -195,21 +187,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let buyer_sig = schnorr_sign(&release_tx, &escrow_utxo, &buyer_kp);
     let seller_sig = schnorr_sign(&release_tx, &escrow_utxo, &seller_kp);
 
-    // Build multisig sig_script: <buyer_sig> <seller_sig> <redeem_script>
-    let mut sig_script = Vec::new();
-    sig_script.push(OpData65);
-    sig_script.extend_from_slice(&buyer_sig);
-    sig_script.push(OpData65);
-    sig_script.extend_from_slice(&seller_sig);
-    sig_script.extend_from_slice(&ScriptBuilder::new().add_data(&redeem_script)?.drain());
+    let sig_script = build_multisig_sig_script(vec![buyer_sig, seller_sig], &redeem_script);
 
     let mut signed_release_tx = release_tx;
     signed_release_tx.inputs[0].signature_script = sig_script;
 
     // Verify locally
-    let verify_result = verify_script(&signed_release_tx, &escrow_utxo);
-    println!("  Local verify: {:?}", verify_result);
-    assert!(verify_result.is_ok(), "Release tx should verify locally");
+    verify_script(&signed_release_tx, &escrow_utxo)
+        .map_err(|e| format!("Release tx failed local verification: {e}"))?;
+    println!("  Local verify: OK");
 
     // Submit
     let rpc_release: RpcTransaction = (&signed_release_tx).into();

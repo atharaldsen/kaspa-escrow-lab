@@ -113,6 +113,138 @@ pub fn p2pk_spk(pubkey: &[u8; 32]) -> ScriptPublicKey {
     pay_to_address_script(&testnet_address(pubkey))
 }
 
+/// Build a P2PK signature script from a 65-byte Schnorr signature.
+/// Format: `<OpData65><signature>`
+pub fn build_p2pk_sig_script(signature: &[u8]) -> Vec<u8> {
+    use kaspa_txscript::opcodes::codes::OpData65;
+    let mut script = Vec::with_capacity(1 + signature.len());
+    script.push(OpData65);
+    script.extend_from_slice(signature);
+    script
+}
+
+/// Build a multisig signature script from multiple 65-byte signatures and a redeem script.
+/// Format: `<OpData65><sig1> <OpData65><sig2> ... <serialized_redeem_script>`
+pub fn build_multisig_sig_script(sigs: Vec<Vec<u8>>, redeem: &[u8]) -> Vec<u8> {
+    use kaspa_txscript::opcodes::codes::OpData65;
+    use kaspa_txscript::script_builder::ScriptBuilder;
+    let mut script = Vec::new();
+    for sig in &sigs {
+        script.push(OpData65);
+        script.extend_from_slice(sig);
+    }
+    script.extend_from_slice(&ScriptBuilder::new().add_data(redeem).unwrap().drain());
+    script
+}
+
+/// Disassemble a script into human-readable opcode notation.
+///
+/// Data pushes are shown as `<hex>`, opcodes as `OP_NAME`.
+/// Useful for debugging and understanding script structure.
+pub fn disassemble_script(script: &[u8]) -> String {
+    let mut parts = Vec::new();
+    let mut i = 0;
+
+    while i < script.len() {
+        let op = script[i];
+        match op {
+            // Data push: next `op` bytes (1-75)
+            0x01..=0x4b => {
+                let len = op as usize;
+                if i + 1 + len <= script.len() {
+                    let data = &script[i + 1..i + 1 + len];
+                    if len <= 8 {
+                        parts.push(format!("<{}>", hex::encode(data)));
+                    } else {
+                        parts.push(format!("<{}..{} ({} bytes)>",
+                            hex::encode(&data[..4]), hex::encode(&data[len-2..]), len));
+                    }
+                    i += 1 + len;
+                } else {
+                    parts.push(format!("[TRUNCATED data{}]", len));
+                    break;
+                }
+            }
+            // OpPushData1: 1-byte length prefix
+            0x4c => {
+                if i + 1 < script.len() {
+                    let len = script[i + 1] as usize;
+                    if i + 2 + len <= script.len() {
+                        parts.push(format!("<pushdata1: {} bytes>", len));
+                        i += 2 + len;
+                    } else {
+                        parts.push("[TRUNCATED pushdata1]".to_string());
+                        break;
+                    }
+                } else {
+                    parts.push("[TRUNCATED pushdata1]".to_string());
+                    break;
+                }
+            }
+            // OpPushData2: 2-byte LE length prefix
+            0x4d => {
+                if i + 2 < script.len() {
+                    let len = u16::from_le_bytes([script[i + 1], script[i + 2]]) as usize;
+                    if i + 3 + len <= script.len() {
+                        parts.push(format!("<pushdata2: {} bytes>", len));
+                        i += 3 + len;
+                    } else {
+                        parts.push("[TRUNCATED pushdata2]".to_string());
+                        break;
+                    }
+                } else {
+                    parts.push("[TRUNCATED pushdata2]".to_string());
+                    break;
+                }
+            }
+            // Constants
+            0x00 => { parts.push("OP_FALSE".into()); i += 1; }
+            0x4f => { parts.push("OP_1NEGATE".into()); i += 1; }
+            0x51 => { parts.push("OP_1".into()); i += 1; }
+            0x52 => { parts.push("OP_2".into()); i += 1; }
+            0x53 => { parts.push("OP_3".into()); i += 1; }
+            0x54..=0x60 => { parts.push(format!("OP_{}", op - 0x50)); i += 1; }
+            // Control flow
+            0x63 => { parts.push("OP_IF".into()); i += 1; }
+            0x64 => { parts.push("OP_NOTIF".into()); i += 1; }
+            0x67 => { parts.push("OP_ELSE".into()); i += 1; }
+            0x68 => { parts.push("OP_ENDIF".into()); i += 1; }
+            0x69 => { parts.push("OP_VERIFY".into()); i += 1; }
+            0x6a => { parts.push("OP_RETURN".into()); i += 1; }
+            // Stack
+            0x75 => { parts.push("OP_DROP".into()); i += 1; }
+            0x76 => { parts.push("OP_DUP".into()); i += 1; }
+            // Comparison
+            0x87 => { parts.push("OP_EQUAL".into()); i += 1; }
+            0x88 => { parts.push("OP_EQUALVERIFY".into()); i += 1; }
+            // Arithmetic
+            0x93 => { parts.push("OP_ADD".into()); i += 1; }
+            0x94 => { parts.push("OP_SUB".into()); i += 1; }
+            0x9f => { parts.push("OP_LESSTHAN".into()); i += 1; }
+            0xa0 => { parts.push("OP_GREATERTHAN".into()); i += 1; }
+            0xa2 => { parts.push("OP_GREATERTHANOREQUAL".into()); i += 1; }
+            // Crypto
+            0xaa => { parts.push("OP_BLAKE2B".into()); i += 1; }
+            0xac => { parts.push("OP_CHECKSIG".into()); i += 1; }
+            0xae => { parts.push("OP_CHECKMULTISIG".into()); i += 1; }
+            0xb0 => { parts.push("OP_CHECKLOCKTIMEVERIFY".into()); i += 1; }
+            // Introspection
+            0xb2 => { parts.push("OP_TXVERSION".into()); i += 1; }
+            0xb3 => { parts.push("OP_TXINPUTCOUNT".into()); i += 1; }
+            0xb4 => { parts.push("OP_TXOUTPUTCOUNT".into()); i += 1; }
+            0xb5 => { parts.push("OP_TXLOCKTIME".into()); i += 1; }
+            0xbe => { parts.push("OP_TXINPUTAMOUNT".into()); i += 1; }
+            0xbf => { parts.push("OP_TXINPUTSPK".into()); i += 1; }
+            0xc2 => { parts.push("OP_TXOUTPUTAMOUNT".into()); i += 1; }
+            0xc3 => { parts.push("OP_TXOUTPUTSPK".into()); i += 1; }
+            // Unknown
+            _ => { parts.push(format!("OP_UNKNOWN(0x{:02x})", op)); i += 1; }
+        }
+    }
+
+    parts.join(" ")
+}
+
 pub fn print_header(title: &str) {
     println!("\n=== {} ===\n", title);
 }

@@ -48,4 +48,7 @@ fn main() {
     println!();
     println!("  cargo run --example live_escrow");
     println!("    End-to-end 2-of-2 escrow on testnet");
+    println!();
+    println!("  cargo run --example live_covenant_escrow");
+    println!("    Covenant timeout refund with on-chain introspection");
 }

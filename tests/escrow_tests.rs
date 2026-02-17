@@ -15,19 +15,7 @@ use kaspa_txscript::{
     standard::multisig_redeem_script,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers shared across tests
-// ---------------------------------------------------------------------------
-
-fn build_multisig_sig_script(sigs: Vec<Vec<u8>>, redeem: &[u8]) -> Vec<u8> {
-    let mut sig_bytes: Vec<u8> = Vec::new();
-    for sig in &sigs {
-        sig_bytes.push(OpData65);
-        sig_bytes.extend_from_slice(sig);
-    }
-    sig_bytes.extend_from_slice(&ScriptBuilder::new().add_data(redeem).unwrap().drain());
-    sig_bytes
-}
+// build_multisig_sig_script is now in kaspa_escrow_lab::* (lib.rs)
 
 // ---------------------------------------------------------------------------
 // Basic 2-of-2 Escrow

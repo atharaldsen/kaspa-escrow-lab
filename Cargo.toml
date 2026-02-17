@@ -63,3 +63,7 @@ path = "examples/connect_test.rs"
 [[example]]
 name = "live_escrow"
 path = "examples/live_escrow.rs"
+
+[[example]]
+name = "live_covenant_escrow"
+path = "examples/live_covenant_escrow.rs"
