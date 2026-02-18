@@ -70,95 +70,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Seller pubkey:      {}", hex::encode(seller_pk));
     println!("  Arbitrator pubkey:  {}", hex::encode(arbitrator_pk));
 
-    // Step 3: Build covenant escrow script
-    // Lock time is set to current_daa - 10 so the timeout path is already available.
-    // This lets us test the covenant constraints immediately after funding.
-    let lock_time_value = current_daa.saturating_sub(10);
     let fee: u64 = 5000;
 
-    print_step(3, "Building covenant escrow script...");
-    println!("  Lock time: {} (current DAA: {})", lock_time_value, current_daa);
+    print_step(3, "Preparing covenant parameters...");
 
     let buyer_spk = p2pk_spk(&buyer_pk);
     let buyer_spk_bytes = spk_to_bytes(&buyer_spk);
-
-    // Script structure:
-    //   OpIf
-    //     OpIf
-    //       2 <buyer> <seller> 2 OpCheckMultiSig       // Branch 1: normal
-    //     OpElse
-    //       2 <buyer> <seller> <arb> 3 OpCheckMultiSig  // Branch 2: dispute
-    //     OpEndIf
-    //   OpElse
-    //     <lock_time> OpCheckLockTimeVerify              // Branch 3: timeout
-    //     <buyer_spk> 0 OpTxOutputSpk OpEqualVerify      //   covenant: output → buyer
-    //     0 OpTxOutputAmount <min> OpGreaterThanOrEqual   //   covenant: min amount
-    //   OpEndIf
-    let redeem_script = ScriptBuilder::new()
-        .add_op(OpIf)?
-        .add_op(OpIf)?
-        .add_i64(2)?
-        .add_data(&buyer_pk)?
-        .add_data(&seller_pk)?
-        .add_i64(2)?
-        .add_op(OpCheckMultiSig)?
-        .add_op(OpElse)?
-        .add_i64(2)?
-        .add_data(&buyer_pk)?
-        .add_data(&seller_pk)?
-        .add_data(&arbitrator_pk)?
-        .add_i64(3)?
-        .add_op(OpCheckMultiSig)?
-        .add_op(OpEndIf)?
-        .add_op(OpElse)?
-        .add_i64(lock_time_value as i64)?
-        .add_op(OpCheckLockTimeVerify)?
-        .add_data(&buyer_spk_bytes)?
-        .add_i64(0)?
-        .add_op(OpTxOutputSpk)?
-        .add_op(OpEqualVerify)?
-        .add_i64(0)?
-        .add_op(OpTxOutputAmount)?
-        // min_amount will be set after we know the escrow amount
-        // For now use a placeholder — we'll rebuild after funding
-        .add_i64(0)?
-        .add_op(OpGreaterThanOrEqual)?
-        .add_op(OpEndIf)?
-        .drain();
-
-    println!("  Redeem script: {} bytes", redeem_script.len());
-    println!("  Disassembly:\n    {}", disassemble_script(&redeem_script));
+    println!("  Script will be built after funding (needs actual amounts + current DAA)");
 
     // Step 4: Wait for funding
     print_step(4, "Waiting for funds...");
-    println!("  Send test KAS to buyer address:");
+    println!("  Fund the buyer address via wallet or miner:");
     println!("  {}", buyer_addr);
-    println!("  (In wallet: transfer {})", buyer_addr);
+    println!("  Wallet:  send {} 10", buyer_addr);
+    println!("  Miner:   kaspa-miner --mining-address {} --mine-when-not-synced", buyer_addr);
+    println!("  (Coinbase UTXOs need ~1000 DAA to mature, roughly 17 minutes)");
     println!();
 
-    let max_wait = Duration::from_secs(300);
+    let max_wait = Duration::from_secs(1500);
     let start = std::time::Instant::now();
+    let mut poll_count = 0u64;
+    let coinbase_maturity: u64 = 1000;
     let (outpoint, utxo_amount) = loop {
+        let info = client.get_block_dag_info().await?;
+        let current_daa = info.virtual_daa_score;
         let utxos = client
             .get_utxos_by_addresses(vec![buyer_addr.clone()])
             .await?;
-        if let Some(entry) = utxos.first() {
+        let mature = utxos.iter().find(|e| {
+            !e.utxo_entry.is_coinbase
+                || current_daa >= e.utxo_entry.block_daa_score + coinbase_maturity
+        });
+        if let Some(entry) = mature {
+            if poll_count > 0 {
+                eprintln!();
+            }
             let op = TransactionOutpoint::new(
                 entry.outpoint.transaction_id,
                 entry.outpoint.index,
             );
             println!(
-                "  Found UTXO: {} sompi (tx: {})",
+                "  Found mature UTXO: {} sompi (tx: {})",
                 entry.utxo_entry.amount, entry.outpoint.transaction_id
             );
             break (op, entry.utxo_entry.amount);
         }
+        let immature_count = utxos.len();
         if start.elapsed() > max_wait {
-            return Err(
-                "Timed out after 5 minutes waiting for funds. Send test KAS and try again.".into(),
-            );
+            if immature_count > 0 {
+                return Err(format!(
+                    "Found {} immature coinbase UTXO(s) but none are spendable yet \
+                     (need {} DAA confirmations). Keep mining and try again.",
+                    immature_count, coinbase_maturity
+                ).into());
+            }
+            return Err("Timed out waiting for funds. Send test KAS and try again.".into());
         }
-        eprint!(".");
+        poll_count += 1;
+        if poll_count % 30 == 0 {
+            let elapsed = start.elapsed().as_secs();
+            if immature_count > 0 {
+                eprintln!(" ({elapsed}s, {immature_count} immature UTXOs waiting to mature)");
+            } else {
+                eprintln!(" ({elapsed}s)");
+            }
+        } else {
+            eprint!(".");
+        }
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
 
@@ -174,10 +152,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let escrow_amount = utxo_amount - fee;
     let refund_amount = escrow_amount - fee;
 
-    print_step(5, "Rebuilding script with actual amounts...");
-    println!("  UTXO:    {} sompi", utxo_amount);
-    println!("  Escrow:  {} sompi (after funding fee)", escrow_amount);
-    println!("  Refund:  {} sompi (after refund fee)", refund_amount);
+    // Set lock_time to current DAA - 10 so the timeout path is immediately available
+    let info = client.get_block_dag_info().await?;
+    let lock_time_value = info.virtual_daa_score.saturating_sub(10);
+
+    print_step(5, "Building script with actual amounts...");
+    println!("  UTXO:      {} sompi", utxo_amount);
+    println!("  Escrow:    {} sompi (after funding fee)", escrow_amount);
+    println!("  Refund:    {} sompi (after refund fee)", refund_amount);
+    println!("  Lock time: {} (current DAA: {})", lock_time_value, info.virtual_daa_score);
 
     let redeem_script = ScriptBuilder::new()
         .add_op(OpIf)?
@@ -253,60 +236,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let funding_tx_id = client.submit_transaction(rpc_tx, false).await?;
     println!("  Funding TX submitted: {}", funding_tx_id);
 
-    // Step 7: Wait for escrow UTXO
-    print_step(7, "Waiting for escrow UTXO...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Step 7: Wait for escrow UTXO to be finalized
+    print_step(7, "Waiting for escrow UTXO to finalize...");
     println!("  Escrow at outpoint {}:0", funding_tx_id);
 
-    // Step 8: Build timeout refund transaction (Branch 3)
+    // Step 8: Build and submit timeout refund transaction (Branch 3)
     // This is the covenant test — no signatures needed!
     // The script validates: output goes to buyer's address with >= refund_amount.
-    let info = client.get_block_dag_info().await?;
-    let spend_daa = info.virtual_daa_score;
-    println!("  Current DAA: {} (lock_time threshold: {})", spend_daa, lock_time_value);
-
+    // We retry submission because the escrow UTXO needs to be finalized first.
     print_step(8, "Building covenant timeout refund (no signatures!)...");
     let escrow_outpoint = TransactionOutpoint::new(funding_tx_id, 0);
-    let refund_input = TransactionInput {
-        previous_outpoint: escrow_outpoint,
-        signature_script: vec![],
-        sequence: 0,
-        sig_op_count: 4,
-    };
-    let refund_output = TransactionOutput {
-        value: refund_amount,
-        script_public_key: buyer_spk.clone(),
-        covenant: None,
-    };
-    let refund_tx = Transaction::new(
-        1,
-        vec![refund_input],
-        vec![refund_output],
-        spend_daa, // lock_time must be >= threshold and <= current DAA
-        Default::default(),
-        0,
-        vec![],
-    );
-
-    // sig_script for timeout branch: OpFalse (select outer else) + serialized redeem script
-    let mut sb = ScriptBuilder::new();
-    sb.add_op(OpFalse)?;
-    sb.add_data(&redeem_script)?;
-    let sig_script = sb.drain();
-
-    let mut signed_refund_tx = refund_tx;
-    signed_refund_tx.inputs[0].signature_script = sig_script;
 
     let escrow_utxo =
         kaspa_consensus_core::tx::UtxoEntry::new(escrow_amount, p2sh_spk, 0, false, None);
 
-    verify_script(&signed_refund_tx, &escrow_utxo)
-        .map_err(|e| format!("Refund tx failed local verification: {e}"))?;
-    println!("  Local verify: OK");
-    println!("  (Covenant enforced: output → buyer address, amount >= {} sompi)", refund_amount);
+    let refund_tx_id;
+    let max_retries = 30;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let info = client.get_block_dag_info().await?;
+        let spend_daa = info.virtual_daa_score;
 
-    let rpc_refund: RpcTransaction = (&signed_refund_tx).into();
-    let refund_tx_id = client.submit_transaction(rpc_refund, false).await?;
+        let refund_input = TransactionInput {
+            previous_outpoint: escrow_outpoint.clone(),
+            signature_script: vec![],
+            sequence: 0,
+            sig_op_count: 4,
+        };
+        let refund_output = TransactionOutput {
+            value: refund_amount,
+            script_public_key: buyer_spk.clone(),
+            covenant: None,
+        };
+        let refund_tx = Transaction::new(
+            1,
+            vec![refund_input],
+            vec![refund_output],
+            spend_daa,
+            Default::default(),
+            0,
+            vec![],
+        );
+
+        let mut sb = ScriptBuilder::new();
+        sb.add_op(OpFalse)?;
+        sb.add_data(&redeem_script)?;
+        let sig_script = sb.drain();
+
+        let mut signed_refund_tx = refund_tx;
+        signed_refund_tx.inputs[0].signature_script = sig_script;
+
+        if attempt == 1 {
+            verify_script(&signed_refund_tx, &escrow_utxo)
+                .map_err(|e| format!("Refund tx failed local verification: {e}"))?;
+            println!("  Local verify: OK");
+            println!("  (Covenant enforced: output → buyer address, amount >= {} sompi)", refund_amount);
+            println!("  Current DAA: {} (lock_time threshold: {})", spend_daa, lock_time_value);
+        }
+
+        let rpc_refund: RpcTransaction = (&signed_refund_tx).into();
+        match client.submit_transaction(rpc_refund, false).await {
+            Ok(tx_id) => {
+                refund_tx_id = tx_id;
+                break;
+            }
+            Err(e) => {
+                let err_msg = format!("{e}");
+                if err_msg.contains("not finalized") && attempt < max_retries {
+                    if attempt == 1 {
+                        eprint!("  Waiting for finalization");
+                    }
+                    eprint!(".");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+                if attempt > 1 {
+                    eprintln!();
+                }
+                return Err(format!("Refund tx rejected after {attempt} attempts: {e}").into());
+            }
+        }
+    }
+    if attempt > 1 {
+        eprintln!();
+    }
     println!("  Refund TX submitted: {}", refund_tx_id);
 
     // Step 9: Verify buyer got refund

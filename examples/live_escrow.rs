@@ -61,29 +61,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 4: Wait for funding
     print_step(4, "Waiting for funds...");
-    println!("  Send test KAS to buyer address:");
+    println!("  Fund the buyer address via wallet or miner:");
     println!("  {}", buyer_addr);
-    println!("  (In wallet: transfer {})", buyer_addr);
+    println!("  Wallet:  send {} 10", buyer_addr);
+    println!("  Miner:   kaspa-miner --mining-address {} --mine-when-not-synced", buyer_addr);
+    println!("  (Coinbase UTXOs need ~1000 DAA to mature, roughly 17 minutes)");
     println!();
 
-    let max_wait = Duration::from_secs(300);
+    let max_wait = Duration::from_secs(1500);
     let start = std::time::Instant::now();
+    let mut poll_count = 0u64;
+    let coinbase_maturity: u64 = 1000;
     let (outpoint, utxo_amount) = loop {
+        let info = client.get_block_dag_info().await?;
+        let current_daa = info.virtual_daa_score;
         let utxos = client
             .get_utxos_by_addresses(vec![buyer_addr.clone()])
             .await?;
-        if let Some(entry) = utxos.first() {
+        // Find a mature UTXO (coinbase UTXOs need 1000 DAA confirmations)
+        let mature = utxos.iter().find(|e| {
+            !e.utxo_entry.is_coinbase
+                || current_daa >= e.utxo_entry.block_daa_score + coinbase_maturity
+        });
+        if let Some(entry) = mature {
+            if poll_count > 0 {
+                eprintln!();
+            }
             let op = TransactionOutpoint::new(
                 entry.outpoint.transaction_id,
                 entry.outpoint.index,
             );
-            println!("  Found UTXO: {} sompi (tx: {})", entry.utxo_entry.amount, entry.outpoint.transaction_id);
+            println!("  Found mature UTXO: {} sompi (tx: {})", entry.utxo_entry.amount, entry.outpoint.transaction_id);
             break (op, entry.utxo_entry.amount);
         }
+        let immature_count = utxos.len();
         if start.elapsed() > max_wait {
-            return Err("Timed out after 5 minutes waiting for funds. Send test KAS and try again.".into());
+            if immature_count > 0 {
+                return Err(format!(
+                    "Found {} immature coinbase UTXO(s) but none are spendable yet \
+                     (need {} DAA confirmations). Keep mining and try again.",
+                    immature_count, coinbase_maturity
+                ).into());
+            }
+            return Err("Timed out waiting for funds. Send test KAS and try again.".into());
         }
-        eprint!(".");
+        poll_count += 1;
+        if poll_count % 30 == 0 {
+            let elapsed = start.elapsed().as_secs();
+            if immature_count > 0 {
+                eprintln!(" ({elapsed}s, {immature_count} immature UTXOs waiting to mature)");
+            } else {
+                eprintln!(" ({elapsed}s)");
+            }
+        } else {
+            eprint!(".");
+        }
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
 
