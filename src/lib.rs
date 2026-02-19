@@ -1,3 +1,5 @@
+pub mod sdk;
+
 use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::{
     hashing::{
@@ -108,6 +110,78 @@ pub fn schnorr_sign(tx: &Transaction, utxo_entry: &UtxoEntry, keypair: &Keypair)
     signature
 }
 
+/// Sign a specific transaction input with a Schnorr keypair.
+/// For multi-input transactions (e.g. UTXO compounding).
+/// Returns the 65-byte signature (64-byte sig + SIG_HASH_ALL byte).
+///
+/// # Panics
+/// Panics if `input_index` is out of bounds for the transaction inputs or UTXO entries.
+pub fn schnorr_sign_input(
+    tx: &Transaction,
+    utxo_entries: &[UtxoEntry],
+    keypair: &Keypair,
+    input_index: usize,
+) -> Vec<u8> {
+    assert!(
+        input_index < tx.inputs.len(),
+        "input_index {input_index} out of bounds for {} inputs",
+        tx.inputs.len()
+    );
+    assert!(
+        input_index < utxo_entries.len(),
+        "input_index {input_index} out of bounds for {} UTXO entries",
+        utxo_entries.len()
+    );
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let mtx = MutableTransaction::with_entries(tx.clone(), utxo_entries.to_vec());
+    let sig_hash = calc_schnorr_signature_hash(
+        &mtx.as_verifiable(),
+        input_index,
+        SIG_HASH_ALL,
+        &reused_values,
+    );
+    let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
+    let sig = keypair.sign_schnorr(msg);
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(sig.as_ref().as_slice());
+    signature.push(SIG_HASH_ALL.to_u8());
+    signature
+}
+
+/// Execute the script engine on a specific input index and return Ok(()) or an error string.
+///
+/// # Panics
+/// Panics if `input_index` is out of bounds for the transaction inputs or UTXO entries.
+pub fn verify_script_input(
+    tx: &Transaction,
+    utxo_entries: &[UtxoEntry],
+    input_index: usize,
+) -> Result<(), String> {
+    assert!(
+        input_index < tx.inputs.len(),
+        "input_index {input_index} out of bounds for {} inputs",
+        tx.inputs.len()
+    );
+    assert!(
+        input_index < utxo_entries.len(),
+        "input_index {input_index} out of bounds for {} UTXO entries",
+        utxo_entries.len()
+    );
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let ctx = EngineCtx::new(&sig_cache).with_reused(&reused_values);
+    let populated = PopulatedTransaction::new(tx, utxo_entries.to_vec());
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated,
+        &populated.tx.inputs[input_index],
+        input_index,
+        &utxo_entries[input_index],
+        ctx,
+        Default::default(),
+    );
+    vm.execute().map_err(|e| format!("{:?}", e))
+}
+
 /// Create a P2PK ScriptPublicKey for a testnet address from an x-only pubkey.
 pub fn p2pk_spk(pubkey: &[u8; 32]) -> ScriptPublicKey {
     pay_to_address_script(&testnet_address(pubkey))
@@ -156,8 +230,12 @@ pub fn disassemble_script(script: &[u8]) -> String {
                     if len <= 8 {
                         parts.push(format!("<{}>", hex::encode(data)));
                     } else {
-                        parts.push(format!("<{}..{} ({} bytes)>",
-                            hex::encode(&data[..4]), hex::encode(&data[len-2..]), len));
+                        parts.push(format!(
+                            "<{}..{} ({} bytes)>",
+                            hex::encode(&data[..4]),
+                            hex::encode(&data[len - 2..]),
+                            len
+                        ));
                     }
                     i += 1 + len;
                 } else {
@@ -198,47 +276,149 @@ pub fn disassemble_script(script: &[u8]) -> String {
                 }
             }
             // Constants
-            0x00 => { parts.push("OP_FALSE".into()); i += 1; }
-            0x4f => { parts.push("OP_1NEGATE".into()); i += 1; }
-            0x51 => { parts.push("OP_1".into()); i += 1; }
-            0x52 => { parts.push("OP_2".into()); i += 1; }
-            0x53 => { parts.push("OP_3".into()); i += 1; }
-            0x54..=0x60 => { parts.push(format!("OP_{}", op - 0x50)); i += 1; }
+            0x00 => {
+                parts.push("OP_FALSE".into());
+                i += 1;
+            }
+            0x4f => {
+                parts.push("OP_1NEGATE".into());
+                i += 1;
+            }
+            0x51 => {
+                parts.push("OP_1".into());
+                i += 1;
+            }
+            0x52 => {
+                parts.push("OP_2".into());
+                i += 1;
+            }
+            0x53 => {
+                parts.push("OP_3".into());
+                i += 1;
+            }
+            0x54..=0x60 => {
+                parts.push(format!("OP_{}", op - 0x50));
+                i += 1;
+            }
             // Control flow
-            0x63 => { parts.push("OP_IF".into()); i += 1; }
-            0x64 => { parts.push("OP_NOTIF".into()); i += 1; }
-            0x67 => { parts.push("OP_ELSE".into()); i += 1; }
-            0x68 => { parts.push("OP_ENDIF".into()); i += 1; }
-            0x69 => { parts.push("OP_VERIFY".into()); i += 1; }
-            0x6a => { parts.push("OP_RETURN".into()); i += 1; }
+            0x63 => {
+                parts.push("OP_IF".into());
+                i += 1;
+            }
+            0x64 => {
+                parts.push("OP_NOTIF".into());
+                i += 1;
+            }
+            0x67 => {
+                parts.push("OP_ELSE".into());
+                i += 1;
+            }
+            0x68 => {
+                parts.push("OP_ENDIF".into());
+                i += 1;
+            }
+            0x69 => {
+                parts.push("OP_VERIFY".into());
+                i += 1;
+            }
+            0x6a => {
+                parts.push("OP_RETURN".into());
+                i += 1;
+            }
             // Stack
-            0x75 => { parts.push("OP_DROP".into()); i += 1; }
-            0x76 => { parts.push("OP_DUP".into()); i += 1; }
+            0x75 => {
+                parts.push("OP_DROP".into());
+                i += 1;
+            }
+            0x76 => {
+                parts.push("OP_DUP".into());
+                i += 1;
+            }
             // Comparison
-            0x87 => { parts.push("OP_EQUAL".into()); i += 1; }
-            0x88 => { parts.push("OP_EQUALVERIFY".into()); i += 1; }
+            0x87 => {
+                parts.push("OP_EQUAL".into());
+                i += 1;
+            }
+            0x88 => {
+                parts.push("OP_EQUALVERIFY".into());
+                i += 1;
+            }
             // Arithmetic
-            0x93 => { parts.push("OP_ADD".into()); i += 1; }
-            0x94 => { parts.push("OP_SUB".into()); i += 1; }
-            0x9f => { parts.push("OP_LESSTHAN".into()); i += 1; }
-            0xa0 => { parts.push("OP_GREATERTHAN".into()); i += 1; }
-            0xa2 => { parts.push("OP_GREATERTHANOREQUAL".into()); i += 1; }
+            0x93 => {
+                parts.push("OP_ADD".into());
+                i += 1;
+            }
+            0x94 => {
+                parts.push("OP_SUB".into());
+                i += 1;
+            }
+            0x9f => {
+                parts.push("OP_LESSTHAN".into());
+                i += 1;
+            }
+            0xa0 => {
+                parts.push("OP_GREATERTHAN".into());
+                i += 1;
+            }
+            0xa2 => {
+                parts.push("OP_GREATERTHANOREQUAL".into());
+                i += 1;
+            }
             // Crypto
-            0xaa => { parts.push("OP_BLAKE2B".into()); i += 1; }
-            0xac => { parts.push("OP_CHECKSIG".into()); i += 1; }
-            0xae => { parts.push("OP_CHECKMULTISIG".into()); i += 1; }
-            0xb0 => { parts.push("OP_CHECKLOCKTIMEVERIFY".into()); i += 1; }
+            0xaa => {
+                parts.push("OP_BLAKE2B".into());
+                i += 1;
+            }
+            0xac => {
+                parts.push("OP_CHECKSIG".into());
+                i += 1;
+            }
+            0xae => {
+                parts.push("OP_CHECKMULTISIG".into());
+                i += 1;
+            }
+            0xb0 => {
+                parts.push("OP_CHECKLOCKTIMEVERIFY".into());
+                i += 1;
+            }
             // Introspection
-            0xb2 => { parts.push("OP_TXVERSION".into()); i += 1; }
-            0xb3 => { parts.push("OP_TXINPUTCOUNT".into()); i += 1; }
-            0xb4 => { parts.push("OP_TXOUTPUTCOUNT".into()); i += 1; }
-            0xb5 => { parts.push("OP_TXLOCKTIME".into()); i += 1; }
-            0xbe => { parts.push("OP_TXINPUTAMOUNT".into()); i += 1; }
-            0xbf => { parts.push("OP_TXINPUTSPK".into()); i += 1; }
-            0xc2 => { parts.push("OP_TXOUTPUTAMOUNT".into()); i += 1; }
-            0xc3 => { parts.push("OP_TXOUTPUTSPK".into()); i += 1; }
+            0xb2 => {
+                parts.push("OP_TXVERSION".into());
+                i += 1;
+            }
+            0xb3 => {
+                parts.push("OP_TXINPUTCOUNT".into());
+                i += 1;
+            }
+            0xb4 => {
+                parts.push("OP_TXOUTPUTCOUNT".into());
+                i += 1;
+            }
+            0xb5 => {
+                parts.push("OP_TXLOCKTIME".into());
+                i += 1;
+            }
+            0xbe => {
+                parts.push("OP_TXINPUTAMOUNT".into());
+                i += 1;
+            }
+            0xbf => {
+                parts.push("OP_TXINPUTSPK".into());
+                i += 1;
+            }
+            0xc2 => {
+                parts.push("OP_TXOUTPUTAMOUNT".into());
+                i += 1;
+            }
+            0xc3 => {
+                parts.push("OP_TXOUTPUTSPK".into());
+                i += 1;
+            }
             // Unknown
-            _ => { parts.push(format!("OP_UNKNOWN(0x{:02x})", op)); i += 1; }
+            _ => {
+                parts.push(format!("OP_UNKNOWN(0x{:02x})", op));
+                i += 1;
+            }
         }
     }
 

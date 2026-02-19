@@ -41,7 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let info = client.get_block_dag_info().await?;
-    println!("  Connected! Network: {}, DAA: {}", info.network, info.virtual_daa_score);
+    println!(
+        "  Connected! Network: {}, DAA: {}",
+        info.network, info.virtual_daa_score
+    );
 
     // Step 2: Generate keypairs
     print_step(2, "Generating keypairs...");
@@ -64,7 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Fund the buyer address via wallet or miner:");
     println!("  {}", buyer_addr);
     println!("  Wallet:  send {} 10", buyer_addr);
-    println!("  Miner:   kaspa-miner --mining-address {} --mine-when-not-synced", buyer_addr);
+    println!(
+        "  Miner:   kaspa-miner --mining-address {} --mine-when-not-synced",
+        buyer_addr
+    );
     println!("  (Coinbase UTXOs need ~1000 DAA to mature, roughly 17 minutes)");
     println!();
 
@@ -87,11 +93,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if poll_count > 0 {
                 eprintln!();
             }
-            let op = TransactionOutpoint::new(
-                entry.outpoint.transaction_id,
-                entry.outpoint.index,
+            let op = TransactionOutpoint::new(entry.outpoint.transaction_id, entry.outpoint.index);
+            println!(
+                "  Found mature UTXO: {} sompi (tx: {})",
+                entry.utxo_entry.amount, entry.outpoint.transaction_id
             );
-            println!("  Found mature UTXO: {} sompi (tx: {})", entry.utxo_entry.amount, entry.outpoint.transaction_id);
             break (op, entry.utxo_entry.amount);
         }
         let immature_count = utxos.len();
@@ -101,7 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Found {} immature coinbase UTXO(s) but none are spendable yet \
                      (need {} DAA confirmations). Keep mining and try again.",
                     immature_count, coinbase_maturity
-                ).into());
+                )
+                .into());
             }
             return Err("Timed out waiting for funds. Send test KAS and try again.".into());
         }
@@ -123,7 +130,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_step(5, "Building escrow funding transaction...");
     let fee: u64 = 5000;
     if utxo_amount <= fee {
-        return Err(format!("UTXO too small: {} sompi (need > {} for fee)", utxo_amount, fee).into());
+        return Err(format!(
+            "UTXO too small: {} sompi (need > {} for fee)",
+            utxo_amount, fee
+        )
+        .into());
     }
     let escrow_amount = utxo_amount - fee;
     println!("  Input:  {} sompi", utxo_amount);
@@ -183,7 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_step(7, "Building release transaction...");
     let release_fee: u64 = 5000;
     if escrow_amount <= release_fee {
-        return Err(format!("Escrow too small: {} sompi (need > {} for fee)", escrow_amount, release_fee).into());
+        return Err(format!(
+            "Escrow too small: {} sompi (need > {} for fee)",
+            escrow_amount, release_fee
+        )
+        .into());
     }
     let release_amount = escrow_amount - release_fee;
     println!("  Escrow input: {} sompi", escrow_amount);

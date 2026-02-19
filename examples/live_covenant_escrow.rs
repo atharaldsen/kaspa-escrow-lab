@@ -83,7 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Fund the buyer address via wallet or miner:");
     println!("  {}", buyer_addr);
     println!("  Wallet:  send {} 10", buyer_addr);
-    println!("  Miner:   kaspa-miner --mining-address {} --mine-when-not-synced", buyer_addr);
+    println!(
+        "  Miner:   kaspa-miner --mining-address {} --mine-when-not-synced",
+        buyer_addr
+    );
     println!("  (Coinbase UTXOs need ~1000 DAA to mature, roughly 17 minutes)");
     println!();
 
@@ -105,10 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if poll_count > 0 {
                 eprintln!();
             }
-            let op = TransactionOutpoint::new(
-                entry.outpoint.transaction_id,
-                entry.outpoint.index,
-            );
+            let op = TransactionOutpoint::new(entry.outpoint.transaction_id, entry.outpoint.index);
             println!(
                 "  Found mature UTXO: {} sompi (tx: {})",
                 entry.utxo_entry.amount, entry.outpoint.transaction_id
@@ -122,7 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Found {} immature coinbase UTXO(s) but none are spendable yet \
                      (need {} DAA confirmations). Keep mining and try again.",
                     immature_count, coinbase_maturity
-                ).into());
+                )
+                .into());
             }
             return Err("Timed out waiting for funds. Send test KAS and try again.".into());
         }
@@ -160,7 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  UTXO:      {} sompi", utxo_amount);
     println!("  Escrow:    {} sompi (after funding fee)", escrow_amount);
     println!("  Refund:    {} sompi (after refund fee)", refund_amount);
-    println!("  Lock time: {} (current DAA: {})", lock_time_value, info.virtual_daa_score);
+    println!(
+        "  Lock time: {} (current DAA: {})",
+        lock_time_value, info.virtual_daa_score
+    );
 
     let redeem_script = ScriptBuilder::new()
         .add_op(OpIf)?
@@ -291,8 +295,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             verify_script(&signed_refund_tx, &escrow_utxo)
                 .map_err(|e| format!("Refund tx failed local verification: {e}"))?;
             println!("  Local verify: OK");
-            println!("  (Covenant enforced: output → buyer address, amount >= {} sompi)", refund_amount);
-            println!("  Current DAA: {} (lock_time threshold: {})", spend_daa, lock_time_value);
+            println!(
+                "  (Covenant enforced: output → buyer address, amount >= {} sompi)",
+                refund_amount
+            );
+            println!(
+                "  Current DAA: {} (lock_time threshold: {})",
+                spend_daa, lock_time_value
+            );
         }
 
         let rpc_refund: RpcTransaction = (&signed_refund_tx).into();

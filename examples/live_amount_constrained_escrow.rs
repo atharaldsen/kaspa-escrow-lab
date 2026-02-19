@@ -115,10 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if poll_count > 0 {
                 eprintln!();
             }
-            let op = TransactionOutpoint::new(
-                entry.outpoint.transaction_id,
-                entry.outpoint.index,
-            );
+            let op = TransactionOutpoint::new(entry.outpoint.transaction_id, entry.outpoint.index);
             println!(
                 "  Found mature UTXO: {} sompi (tx: {})",
                 entry.utxo_entry.amount, entry.outpoint.transaction_id
@@ -169,15 +166,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_step(5, "Building script with actual amounts...");
     println!("  UTXO:         {} sompi", utxo_amount);
-    println!("  Escrow:       {} sompi (after funding fee)", escrow_amount);
     println!(
-        "  Seller gets:  {} sompi (90%)",
-        seller_amount
+        "  Escrow:       {} sompi (after funding fee)",
+        escrow_amount
     );
-    println!(
-        "  Platform fee: {} sompi (10%)",
-        fee_amount
-    );
+    println!("  Seller gets:  {} sompi (90%)", seller_amount);
+    println!("  Platform fee: {} sompi (10%)", fee_amount);
 
     // Build the amount-constrained escrow script
     //   OpIf
@@ -269,7 +263,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This is the key test — no signatures needed!
     // The script validates: output 0 goes to seller, output 1 goes to fee address,
     // both with minimum amounts enforced by the covenant.
-    print_step(8, "Building covenant payment split release (no signatures!)...");
+    print_step(
+        8,
+        "Building covenant payment split release (no signatures!)...",
+    );
     let escrow_outpoint = TransactionOutpoint::new(funding_tx_id, 0);
 
     let escrow_utxo =
@@ -348,9 +345,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if attempt > 1 {
                     eprintln!();
                 }
-                return Err(
-                    format!("Release tx rejected after {attempt} attempts: {e}").into(),
-                );
+                return Err(format!("Release tx rejected after {attempt} attempts: {e}").into());
             }
         }
     }
@@ -367,10 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_utxos_by_addresses(vec![seller_addr.clone()])
         .await?;
     if let Some(entry) = seller_utxos.first() {
-        println!(
-            "  Seller received:  {} sompi",
-            entry.utxo_entry.amount
-        );
+        println!("  Seller received:  {} sompi", entry.utxo_entry.amount);
     } else {
         println!("  Seller UTXO pending... (may need another block)");
     }
@@ -379,10 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_utxos_by_addresses(vec![fee_addr.clone()])
         .await?;
     if let Some(entry) = fee_utxos.first() {
-        println!(
-            "  Fee addr received: {} sompi",
-            entry.utxo_entry.amount
-        );
+        println!("  Fee addr received: {} sompi", entry.utxo_entry.amount);
     } else {
         println!("  Fee UTXO pending... (may need another block)");
     }
@@ -401,20 +390,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let info = client.get_block_dag_info().await?;
     let current_daa = info.virtual_daa_score;
     let escape_utxo = buyer_utxos.iter().find(|e| {
-        !e.utxo_entry.is_coinbase
-            || current_daa >= e.utxo_entry.block_daa_score + coinbase_maturity
+        !e.utxo_entry.is_coinbase || current_daa >= e.utxo_entry.block_daa_score + coinbase_maturity
     });
 
     if let Some(entry) = escape_utxo {
         let escape_utxo_amount = entry.utxo_entry.amount;
-        let escape_outpoint = TransactionOutpoint::new(
-            entry.outpoint.transaction_id,
-            entry.outpoint.index,
-        );
-        println!(
-            "  Found second mature UTXO: {} sompi",
-            escape_utxo_amount
-        );
+        let escape_outpoint =
+            TransactionOutpoint::new(entry.outpoint.transaction_id, entry.outpoint.index);
+        println!("  Found second mature UTXO: {} sompi", escape_utxo_amount);
 
         if escape_utxo_amount <= funding_fee + release_fee {
             println!("  UTXO too small for escape test, skipping");
@@ -559,9 +542,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     } else {
-        println!(
-            "  No second mature UTXO available — skipping owner escape test"
-        );
+        println!("  No second mature UTXO available — skipping owner escape test");
         println!("  (Mine more blocks to get another mature UTXO)");
     }
 

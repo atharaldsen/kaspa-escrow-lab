@@ -37,7 +37,13 @@ mod basic_escrow {
         let (seller_kp, seller_pk) = generate_keypair();
         let redeem = multisig_redeem_script([buyer_pk, seller_pk].iter(), 2).unwrap();
         let p2sh = pay_to_script_hash_script(&redeem);
-        BasicSetup { buyer_kp, seller_kp, seller_pk, redeem, p2sh }
+        BasicSetup {
+            buyer_kp,
+            seller_kp,
+            seller_pk,
+            redeem,
+            p2sh,
+        }
     }
 
     #[test]
@@ -45,8 +51,14 @@ mod basic_escrow {
         let s = setup();
 
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, 1_000_000_000, vec![],
-            vec![TransactionOutput { value: 999_900_000, script_public_key: p2pk_spk(&s.seller_pk), covenant: None }],
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![TransactionOutput {
+                value: 999_900_000,
+                script_public_key: p2pk_spk(&s.seller_pk),
+                covenant: None,
+            }],
             0,
         );
 
@@ -63,8 +75,14 @@ mod basic_escrow {
         let s = setup();
 
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, 1_000_000_000, vec![],
-            vec![TransactionOutput { value: 999_900_000, script_public_key: p2pk_spk(&s.seller_pk), covenant: None }],
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![TransactionOutput {
+                value: 999_900_000,
+                script_public_key: p2pk_spk(&s.seller_pk),
+                covenant: None,
+            }],
             0,
         );
 
@@ -85,8 +103,14 @@ mod basic_escrow {
         let (wrong_kp, _) = generate_keypair();
 
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, 1_000_000_000, vec![],
-            vec![TransactionOutput { value: 999_900_000, script_public_key: p2pk_spk(&s.seller_pk), covenant: None }],
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![TransactionOutput {
+                value: 999_900_000,
+                script_public_key: p2pk_spk(&s.seller_pk),
+                covenant: None,
+            }],
             0,
         );
 
@@ -119,10 +143,16 @@ mod multisig_escrow {
         let (buyer_kp, buyer_pk) = generate_keypair();
         let (seller_kp, seller_pk) = generate_keypair();
         let (arb_kp, arb_pk) = generate_keypair();
-        let redeem =
-            multisig_redeem_script([buyer_pk, seller_pk, arb_pk].iter(), 2).unwrap();
+        let redeem = multisig_redeem_script([buyer_pk, seller_pk, arb_pk].iter(), 2).unwrap();
         let p2sh = pay_to_script_hash_script(&redeem);
-        MultisigSetup { buyer_kp, seller_kp, seller_pk, arb_kp, redeem, p2sh }
+        MultisigSetup {
+            buyer_kp,
+            seller_kp,
+            seller_pk,
+            arb_kp,
+            redeem,
+            p2sh,
+        }
     }
 
     fn make_output(seller_pk: &[u8; 32]) -> TransactionOutput {
@@ -137,12 +167,16 @@ mod multisig_escrow {
     fn buyer_and_seller_sign() {
         let s = setup();
 
-        let (mut tx, utxo) =
-            build_mock_tx(s.p2sh, 1_000_000_000, vec![], vec![make_output(&s.seller_pk)], 0);
+        let (mut tx, utxo) = build_mock_tx(
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![make_output(&s.seller_pk)],
+            0,
+        );
         let b_sig = schnorr_sign(&tx, &utxo, &s.buyer_kp);
         let s_sig = schnorr_sign(&tx, &utxo, &s.seller_kp);
-        tx.inputs[0].signature_script =
-            build_multisig_sig_script(vec![b_sig, s_sig], &s.redeem);
+        tx.inputs[0].signature_script = build_multisig_sig_script(vec![b_sig, s_sig], &s.redeem);
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }
@@ -151,12 +185,16 @@ mod multisig_escrow {
     fn arbitrator_and_buyer_sign() {
         let s = setup();
 
-        let (mut tx, utxo) =
-            build_mock_tx(s.p2sh, 1_000_000_000, vec![], vec![make_output(&s.seller_pk)], 0);
+        let (mut tx, utxo) = build_mock_tx(
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![make_output(&s.seller_pk)],
+            0,
+        );
         let b_sig = schnorr_sign(&tx, &utxo, &s.buyer_kp);
         let a_sig = schnorr_sign(&tx, &utxo, &s.arb_kp);
-        tx.inputs[0].signature_script =
-            build_multisig_sig_script(vec![b_sig, a_sig], &s.redeem);
+        tx.inputs[0].signature_script = build_multisig_sig_script(vec![b_sig, a_sig], &s.redeem);
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }
@@ -165,12 +203,16 @@ mod multisig_escrow {
     fn arbitrator_and_seller_sign() {
         let s = setup();
 
-        let (mut tx, utxo) =
-            build_mock_tx(s.p2sh, 1_000_000_000, vec![], vec![make_output(&s.seller_pk)], 0);
+        let (mut tx, utxo) = build_mock_tx(
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![make_output(&s.seller_pk)],
+            0,
+        );
         let s_sig = schnorr_sign(&tx, &utxo, &s.seller_kp);
         let a_sig = schnorr_sign(&tx, &utxo, &s.arb_kp);
-        tx.inputs[0].signature_script =
-            build_multisig_sig_script(vec![s_sig, a_sig], &s.redeem);
+        tx.inputs[0].signature_script = build_multisig_sig_script(vec![s_sig, a_sig], &s.redeem);
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }
@@ -179,8 +221,13 @@ mod multisig_escrow {
     fn single_signer_fails() {
         let s = setup();
 
-        let (mut tx, utxo) =
-            build_mock_tx(s.p2sh, 1_000_000_000, vec![], vec![make_output(&s.seller_pk)], 0);
+        let (mut tx, utxo) = build_mock_tx(
+            s.p2sh,
+            1_000_000_000,
+            vec![],
+            vec![make_output(&s.seller_pk)],
+            0,
+        );
         let b_sig = schnorr_sign(&tx, &utxo, &s.buyer_kp);
         let mut sig_bytes: Vec<u8> = Vec::new();
         sig_bytes.push(OpData65);
@@ -203,21 +250,36 @@ mod timelock_escrow {
     const INPUT_VALUE: u64 = 1_000_000_000;
     const OUTPUT_VALUE: u64 = 999_900_000;
 
-    fn build_script(buyer_pk: &[u8; 32], seller_pk: &[u8; 32]) -> (Vec<u8>, kaspa_consensus_core::tx::ScriptPublicKey) {
+    fn build_script(
+        buyer_pk: &[u8; 32],
+        seller_pk: &[u8; 32],
+    ) -> (Vec<u8>, kaspa_consensus_core::tx::ScriptPublicKey) {
         let mut builder = ScriptBuilder::new();
         let redeem = builder
-            .add_op(OpIf).unwrap()
-            .add_i64(2).unwrap()
-            .add_data(buyer_pk).unwrap()
-            .add_data(seller_pk).unwrap()
-            .add_i64(2).unwrap()
-            .add_op(OpCheckMultiSig).unwrap()
-            .add_op(OpElse).unwrap()
-            .add_i64(LOCK_TIME as i64).unwrap()
-            .add_op(OpCheckLockTimeVerify).unwrap()
-            .add_data(buyer_pk).unwrap()
-            .add_op(OpCheckSig).unwrap()
-            .add_op(OpEndIf).unwrap()
+            .add_op(OpIf)
+            .unwrap()
+            .add_i64(2)
+            .unwrap()
+            .add_data(buyer_pk)
+            .unwrap()
+            .add_data(seller_pk)
+            .unwrap()
+            .add_i64(2)
+            .unwrap()
+            .add_op(OpCheckMultiSig)
+            .unwrap()
+            .add_op(OpElse)
+            .unwrap()
+            .add_i64(LOCK_TIME as i64)
+            .unwrap()
+            .add_op(OpCheckLockTimeVerify)
+            .unwrap()
+            .add_data(buyer_pk)
+            .unwrap()
+            .add_op(OpCheckSig)
+            .unwrap()
+            .add_op(OpEndIf)
+            .unwrap()
             .drain();
         let p2sh = pay_to_script_hash_script(&redeem);
         (redeem, p2sh)
@@ -230,8 +292,14 @@ mod timelock_escrow {
         let (redeem, p2sh) = build_script(&buyer_pk, &seller_pk);
 
         let (mut tx, utxo) = build_mock_tx(
-            p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&seller_pk), covenant: None }],
+            p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&seller_pk),
+                covenant: None,
+            }],
             0,
         );
 
@@ -259,8 +327,14 @@ mod timelock_escrow {
         let (redeem, p2sh) = build_script(&buyer_pk, &seller_pk);
 
         let (mut tx, utxo) = build_mock_tx(
-            p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&buyer_pk), covenant: None }],
+            p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&buyer_pk),
+                covenant: None,
+            }],
             LOCK_TIME + 100,
         );
 
@@ -281,8 +355,14 @@ mod timelock_escrow {
         let (redeem, p2sh) = build_script(&buyer_pk, &seller_pk);
 
         let (mut tx, utxo) = build_mock_tx(
-            p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&buyer_pk), covenant: None }],
+            p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&buyer_pk),
+                covenant: None,
+            }],
             LOCK_TIME - 100,
         );
 
@@ -304,8 +384,14 @@ mod timelock_escrow {
         let (redeem, p2sh) = build_script(&buyer_pk, &seller_pk);
 
         let (mut tx, utxo) = build_mock_tx(
-            p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&buyer_pk), covenant: None }],
+            p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&buyer_pk),
+                covenant: None,
+            }],
             LOCK_TIME + 100,
         );
 
@@ -352,45 +438,87 @@ mod covenant_escrow {
 
         let mut builder = ScriptBuilder::new();
         let redeem = builder
-            .add_op(OpIf).unwrap()
-            .add_op(OpIf).unwrap()
-            .add_i64(2).unwrap()
-            .add_data(&buyer_pk).unwrap()
-            .add_data(&seller_pk).unwrap()
-            .add_i64(2).unwrap()
-            .add_op(OpCheckMultiSig).unwrap()
-            .add_op(OpElse).unwrap()
-            .add_i64(2).unwrap()
-            .add_data(&buyer_pk).unwrap()
-            .add_data(&seller_pk).unwrap()
-            .add_data(&arb_pk).unwrap()
-            .add_i64(3).unwrap()
-            .add_op(OpCheckMultiSig).unwrap()
-            .add_op(OpEndIf).unwrap()
-            .add_op(OpElse).unwrap()
-            .add_i64(LOCK_TIME as i64).unwrap()
-            .add_op(OpCheckLockTimeVerify).unwrap()
-            .add_data(&buyer_spk_bytes).unwrap()
-            .add_i64(0).unwrap()
-            .add_op(OpTxOutputSpk).unwrap()
-            .add_op(OpEqualVerify).unwrap()
-            .add_i64(0).unwrap()
-            .add_op(OpTxOutputAmount).unwrap()
-            .add_i64(OUTPUT_VALUE as i64).unwrap()
-            .add_op(OpGreaterThanOrEqual).unwrap()
-            .add_op(OpEndIf).unwrap()
+            .add_op(OpIf)
+            .unwrap()
+            .add_op(OpIf)
+            .unwrap()
+            .add_i64(2)
+            .unwrap()
+            .add_data(&buyer_pk)
+            .unwrap()
+            .add_data(&seller_pk)
+            .unwrap()
+            .add_i64(2)
+            .unwrap()
+            .add_op(OpCheckMultiSig)
+            .unwrap()
+            .add_op(OpElse)
+            .unwrap()
+            .add_i64(2)
+            .unwrap()
+            .add_data(&buyer_pk)
+            .unwrap()
+            .add_data(&seller_pk)
+            .unwrap()
+            .add_data(&arb_pk)
+            .unwrap()
+            .add_i64(3)
+            .unwrap()
+            .add_op(OpCheckMultiSig)
+            .unwrap()
+            .add_op(OpEndIf)
+            .unwrap()
+            .add_op(OpElse)
+            .unwrap()
+            .add_i64(LOCK_TIME as i64)
+            .unwrap()
+            .add_op(OpCheckLockTimeVerify)
+            .unwrap()
+            .add_data(&buyer_spk_bytes)
+            .unwrap()
+            .add_i64(0)
+            .unwrap()
+            .add_op(OpTxOutputSpk)
+            .unwrap()
+            .add_op(OpEqualVerify)
+            .unwrap()
+            .add_i64(0)
+            .unwrap()
+            .add_op(OpTxOutputAmount)
+            .unwrap()
+            .add_i64(OUTPUT_VALUE as i64)
+            .unwrap()
+            .add_op(OpGreaterThanOrEqual)
+            .unwrap()
+            .add_op(OpEndIf)
+            .unwrap()
             .drain();
 
         let p2sh = pay_to_script_hash_script(&redeem);
-        CovenantSetup { buyer_kp, buyer_pk, seller_kp, seller_pk, arb_kp, redeem, p2sh, buyer_spk }
+        CovenantSetup {
+            buyer_kp,
+            buyer_pk,
+            seller_kp,
+            seller_pk,
+            arb_kp,
+            redeem,
+            p2sh,
+            buyer_spk,
+        }
     }
 
     #[test]
     fn branch1_normal_release() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&s.seller_pk), covenant: None }],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&s.seller_pk),
+                covenant: None,
+            }],
             0,
         );
 
@@ -416,8 +544,14 @@ mod covenant_escrow {
     fn branch2_dispute_resolution() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&s.buyer_pk), covenant: None }],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&s.buyer_pk),
+                covenant: None,
+            }],
             0,
         );
 
@@ -443,8 +577,14 @@ mod covenant_escrow {
     fn branch3_timeout_correct_output() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: s.buyer_spk.clone(), covenant: None }],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: s.buyer_spk.clone(),
+                covenant: None,
+            }],
             LOCK_TIME + 100,
         );
 
@@ -461,8 +601,14 @@ mod covenant_escrow {
         let s = setup();
         let (_, wrong_pk) = generate_keypair();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: p2pk_spk(&wrong_pk), covenant: None }],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: p2pk_spk(&wrong_pk),
+                covenant: None,
+            }],
             LOCK_TIME + 100,
         );
 
@@ -478,8 +624,14 @@ mod covenant_escrow {
     fn branch3_amount_too_low_fails() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE - 1, script_public_key: s.buyer_spk.clone(), covenant: None }],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE - 1,
+                script_public_key: s.buyer_spk.clone(),
+                covenant: None,
+            }],
             LOCK_TIME + 100,
         );
 
@@ -495,8 +647,14 @@ mod covenant_escrow {
     fn branch3_before_timeout_fails() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
-            vec![TransactionOutput { value: OUTPUT_VALUE, script_public_key: s.buyer_spk.clone(), covenant: None }],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
+            vec![TransactionOutput {
+                value: OUTPUT_VALUE,
+                script_public_key: s.buyer_spk.clone(),
+                covenant: None,
+            }],
             LOCK_TIME - 100,
         );
 
@@ -540,32 +698,60 @@ mod amount_constrained_escrow {
 
         let mut builder = ScriptBuilder::new();
         let redeem = builder
-            .add_op(OpIf).unwrap()
-            .add_data(&owner_pk).unwrap()
-            .add_op(OpCheckSig).unwrap()
-            .add_op(OpElse).unwrap()
-            .add_data(&seller_spk_bytes).unwrap()
-            .add_i64(0).unwrap()
-            .add_op(OpTxOutputSpk).unwrap()
-            .add_op(OpEqualVerify).unwrap()
-            .add_i64(0).unwrap()
-            .add_op(OpTxOutputAmount).unwrap()
-            .add_i64(SELLER_AMOUNT).unwrap()
-            .add_op(OpGreaterThanOrEqual).unwrap()
-            .add_op(OpVerify).unwrap()
-            .add_data(&fee_spk_bytes).unwrap()
-            .add_i64(1).unwrap()
-            .add_op(OpTxOutputSpk).unwrap()
-            .add_op(OpEqualVerify).unwrap()
-            .add_i64(1).unwrap()
-            .add_op(OpTxOutputAmount).unwrap()
-            .add_i64(FEE_AMOUNT).unwrap()
-            .add_op(OpGreaterThanOrEqual).unwrap()
-            .add_op(OpEndIf).unwrap()
+            .add_op(OpIf)
+            .unwrap()
+            .add_data(&owner_pk)
+            .unwrap()
+            .add_op(OpCheckSig)
+            .unwrap()
+            .add_op(OpElse)
+            .unwrap()
+            .add_data(&seller_spk_bytes)
+            .unwrap()
+            .add_i64(0)
+            .unwrap()
+            .add_op(OpTxOutputSpk)
+            .unwrap()
+            .add_op(OpEqualVerify)
+            .unwrap()
+            .add_i64(0)
+            .unwrap()
+            .add_op(OpTxOutputAmount)
+            .unwrap()
+            .add_i64(SELLER_AMOUNT)
+            .unwrap()
+            .add_op(OpGreaterThanOrEqual)
+            .unwrap()
+            .add_op(OpVerify)
+            .unwrap()
+            .add_data(&fee_spk_bytes)
+            .unwrap()
+            .add_i64(1)
+            .unwrap()
+            .add_op(OpTxOutputSpk)
+            .unwrap()
+            .add_op(OpEqualVerify)
+            .unwrap()
+            .add_i64(1)
+            .unwrap()
+            .add_op(OpTxOutputAmount)
+            .unwrap()
+            .add_i64(FEE_AMOUNT)
+            .unwrap()
+            .add_op(OpGreaterThanOrEqual)
+            .unwrap()
+            .add_op(OpEndIf)
+            .unwrap()
             .drain();
 
         let p2sh = pay_to_script_hash_script(&redeem);
-        SplitSetup { owner_kp, seller_spk, fee_spk, redeem, p2sh }
+        SplitSetup {
+            owner_kp,
+            seller_spk,
+            fee_spk,
+            redeem,
+            p2sh,
+        }
     }
 
     fn correct_outputs(s: &SplitSetup) -> Vec<TransactionOutput> {
@@ -589,7 +775,9 @@ mod amount_constrained_escrow {
         let (_, random_pk) = generate_keypair();
 
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
             vec![TransactionOutput {
                 value: INPUT_VALUE - 1000,
                 script_public_key: p2pk_spk(&random_pk),
@@ -628,10 +816,20 @@ mod amount_constrained_escrow {
         let (_, wrong_pk) = generate_keypair();
 
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
             vec![
-                TransactionOutput { value: SELLER_AMOUNT as u64, script_public_key: p2pk_spk(&wrong_pk), covenant: None },
-                TransactionOutput { value: FEE_AMOUNT as u64, script_public_key: s.fee_spk.clone(), covenant: None },
+                TransactionOutput {
+                    value: SELLER_AMOUNT as u64,
+                    script_public_key: p2pk_spk(&wrong_pk),
+                    covenant: None,
+                },
+                TransactionOutput {
+                    value: FEE_AMOUNT as u64,
+                    script_public_key: s.fee_spk.clone(),
+                    covenant: None,
+                },
             ],
             0,
         );
@@ -648,10 +846,20 @@ mod amount_constrained_escrow {
     fn seller_amount_too_low_fails() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
             vec![
-                TransactionOutput { value: SELLER_AMOUNT as u64 - 1, script_public_key: s.seller_spk.clone(), covenant: None },
-                TransactionOutput { value: FEE_AMOUNT as u64, script_public_key: s.fee_spk.clone(), covenant: None },
+                TransactionOutput {
+                    value: SELLER_AMOUNT as u64 - 1,
+                    script_public_key: s.seller_spk.clone(),
+                    covenant: None,
+                },
+                TransactionOutput {
+                    value: FEE_AMOUNT as u64,
+                    script_public_key: s.fee_spk.clone(),
+                    covenant: None,
+                },
             ],
             0,
         );
@@ -670,10 +878,20 @@ mod amount_constrained_escrow {
         let (_, wrong_pk) = generate_keypair();
 
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
             vec![
-                TransactionOutput { value: SELLER_AMOUNT as u64, script_public_key: s.seller_spk.clone(), covenant: None },
-                TransactionOutput { value: FEE_AMOUNT as u64, script_public_key: p2pk_spk(&wrong_pk), covenant: None },
+                TransactionOutput {
+                    value: SELLER_AMOUNT as u64,
+                    script_public_key: s.seller_spk.clone(),
+                    covenant: None,
+                },
+                TransactionOutput {
+                    value: FEE_AMOUNT as u64,
+                    script_public_key: p2pk_spk(&wrong_pk),
+                    covenant: None,
+                },
             ],
             0,
         );
@@ -690,10 +908,20 @@ mod amount_constrained_escrow {
     fn fee_amount_too_low_fails() {
         let s = setup();
         let (mut tx, utxo) = build_mock_tx(
-            s.p2sh, INPUT_VALUE, vec![],
+            s.p2sh,
+            INPUT_VALUE,
+            vec![],
             vec![
-                TransactionOutput { value: SELLER_AMOUNT as u64, script_public_key: s.seller_spk.clone(), covenant: None },
-                TransactionOutput { value: FEE_AMOUNT as u64 - 1, script_public_key: s.fee_spk.clone(), covenant: None },
+                TransactionOutput {
+                    value: SELLER_AMOUNT as u64,
+                    script_public_key: s.seller_spk.clone(),
+                    covenant: None,
+                },
+                TransactionOutput {
+                    value: FEE_AMOUNT as u64 - 1,
+                    script_public_key: s.fee_spk.clone(),
+                    covenant: None,
+                },
             ],
             0,
         );
