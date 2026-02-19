@@ -11,10 +11,7 @@ use kaspa_escrow_lab::sdk::{
 use kaspa_escrow_lab::*;
 
 fn mock_outpoint() -> TransactionOutpoint {
-    TransactionOutpoint::new(
-        TransactionId::from_bytes([0xaa; 32]),
-        0,
-    )
+    TransactionOutpoint::new(TransactionId::from_bytes([0xaa; 32]), 0)
 }
 
 fn dummy_pk() -> [u8; 32] {
@@ -66,7 +63,12 @@ mod builder_validation {
             .amount(0)
             .build();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("amount must be > 0"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("amount must be > 0")
+        );
     }
 
     #[test]
@@ -125,7 +127,12 @@ mod builder_validation {
             .amount(1_000_000)
             .build();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("fee_percent must be 1-99"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("fee_percent must be 1-99")
+        );
     }
 
     #[test]
@@ -138,7 +145,12 @@ mod builder_validation {
             .amount(1_000_000)
             .build();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("fee_percent must be 1-99"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("fee_percent must be 1-99")
+        );
     }
 
     #[test]
@@ -214,7 +226,10 @@ mod builder_correctness {
             .unwrap();
         assert_eq!(config.seller_amount, 9_000_000_000);
         assert_eq!(config.fee_amount, 1_000_000_000);
-        assert_eq!(config.seller_amount + config.fee_amount, config.escrow_amount);
+        assert_eq!(
+            config.seller_amount + config.fee_amount,
+            config.escrow_amount
+        );
     }
 
     #[test]
@@ -230,7 +245,10 @@ mod builder_correctness {
             .unwrap();
         // seller_amount = (1_000_000_003 * 93) / 100 = 930_000_002
         // fee_amount = 1_000_000_003 - 930_000_002 = 70_000_001
-        assert_eq!(config.seller_amount + config.fee_amount, config.escrow_amount);
+        assert_eq!(
+            config.seller_amount + config.fee_amount,
+            config.escrow_amount
+        );
     }
 
     #[test]
@@ -521,7 +539,13 @@ mod sdk_e2e {
             .unwrap();
 
         let mut tx = build_release_tx(mock_outpoint(), &config, 5000).unwrap();
-        let utxo = UtxoEntry::new(config.escrow_amount, config.p2sh_spk.clone(), 0, false, None);
+        let utxo = UtxoEntry::new(
+            config.escrow_amount,
+            config.p2sh_spk.clone(),
+            0,
+            false,
+            None,
+        );
 
         let b_sig = schnorr_sign(&tx, &utxo, &buyer_kp);
         let s_sig = schnorr_sign(&tx, &utxo, &seller_kp);
@@ -553,7 +577,13 @@ mod sdk_e2e {
             .unwrap();
 
         let mut tx = build_payment_split_tx(mock_outpoint(), &config).unwrap();
-        let utxo = UtxoEntry::new(config.escrow_amount, config.p2sh_spk.clone(), 0, false, None);
+        let utxo = UtxoEntry::new(
+            config.escrow_amount,
+            config.p2sh_spk.clone(),
+            0,
+            false,
+            None,
+        );
 
         tx.inputs[0].signature_script = build_sig_script(
             &Branch::CovenantRelease,
@@ -580,7 +610,13 @@ mod sdk_e2e {
 
         // Normal release
         let mut tx = build_release_tx(mock_outpoint(), &config, 5000).unwrap();
-        let utxo = UtxoEntry::new(config.escrow_amount, config.p2sh_spk.clone(), 0, false, None);
+        let utxo = UtxoEntry::new(
+            config.escrow_amount,
+            config.p2sh_spk.clone(),
+            0,
+            false,
+            None,
+        );
         let b_sig = schnorr_sign(&tx, &utxo, &buyer_kp);
         let s_sig = schnorr_sign(&tx, &utxo, &seller_kp);
         tx.inputs[0].signature_script = build_sig_script(
@@ -594,7 +630,13 @@ mod sdk_e2e {
 
         // Timeout refund
         let mut refund = build_refund_tx(mock_outpoint(), &config, 50_001, 5000).unwrap();
-        let utxo = UtxoEntry::new(config.escrow_amount, config.p2sh_spk.clone(), 0, false, None);
+        let utxo = UtxoEntry::new(
+            config.escrow_amount,
+            config.p2sh_spk.clone(),
+            0,
+            false,
+            None,
+        );
         let b_sig = schnorr_sign(&refund, &utxo, &buyer_kp);
         refund.inputs[0].signature_script = build_sig_script(
             &Branch::Timeout,

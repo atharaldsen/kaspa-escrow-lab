@@ -22,6 +22,8 @@ use kaspa_txscript::{
 };
 use kaspa_wrpc_client::prelude::*;
 use std::time::Duration;
+use serde_json;
+use secp256k1;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,10 +48,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info.network, info.virtual_daa_score
     );
 
-    // Step 2: Generate keypairs
-    print_step(2, "Generating keypairs...");
-    let (buyer_kp, buyer_pk) = generate_keypair();
-    let (seller_kp, seller_pk) = generate_keypair();
+    // Step 2: Generate keypairs (or reload from temp file to survive restarts)
+    print_step(2, "Loading keypairs...");
+    let keys_path = std::path::Path::new("/tmp/escrow_keys.json");
+    let (buyer_kp, buyer_pk, seller_kp, seller_pk) = if keys_path.exists() {
+        let data = std::fs::read_to_string(keys_path)?;
+        let parsed: serde_json::Value = serde_json::from_str(&data)?;
+        let buyer_secret = hex::decode(parsed["buyer_secret"].as_str().unwrap())?;
+        let seller_secret = hex::decode(parsed["seller_secret"].as_str().unwrap())?;
+        let buyer_kp = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &buyer_secret)?;
+        let seller_kp =
+            secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &seller_secret)?;
+        let buyer_pk = buyer_kp.x_only_public_key().0.serialize();
+        let seller_pk = seller_kp.x_only_public_key().0.serialize();
+        println!("  Reloaded keypairs from {}", keys_path.display());
+        (buyer_kp, buyer_pk, seller_kp, seller_pk)
+    } else {
+        let (buyer_kp, buyer_pk) = generate_keypair();
+        let (seller_kp, seller_pk) = generate_keypair();
+        let data = serde_json::json!({
+            "buyer_secret": hex::encode(buyer_kp.secret_bytes()),
+            "seller_secret": hex::encode(seller_kp.secret_bytes()),
+        });
+        std::fs::write(keys_path, serde_json::to_string_pretty(&data)?)?;
+        println!("  Generated new keypairs, saved to {}", keys_path.display());
+        (buyer_kp, buyer_pk, seller_kp, seller_pk)
+    };
 
     let buyer_addr = testnet_address(&buyer_pk);
     let seller_addr = testnet_address(&seller_pk);

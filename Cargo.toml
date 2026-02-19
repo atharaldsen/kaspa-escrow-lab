@@ -18,6 +18,9 @@ kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12
 kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
 kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
 
+# For wallet key derivation (BIP39/BIP32)
+kaspa-bip32 = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -75,3 +78,15 @@ path = "examples/live_amount_constrained_escrow.rs"
 [[example]]
 name = "sdk_demo"
 path = "examples/sdk_demo.rs"
+
+[[example]]
+name = "live_sdk_escrow"
+path = "examples/live_sdk_escrow.rs"
+
+[[example]]
+name = "check_utxo"
+path = "examples/check_utxo.rs"
+
+[[example]]
+name = "fund_escrow"
+path = "examples/fund_escrow.rs"
