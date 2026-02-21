@@ -65,7 +65,7 @@ mod basic_escrow {
         let buyer_sig = schnorr_sign(&tx, &utxo, &s.buyer_kp);
         let seller_sig = schnorr_sign(&tx, &utxo, &s.seller_kp);
         tx.inputs[0].signature_script =
-            build_multisig_sig_script(vec![buyer_sig, seller_sig], &s.redeem);
+            build_multisig_sig_script(vec![buyer_sig, seller_sig], &s.redeem).unwrap();
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }
@@ -117,7 +117,7 @@ mod basic_escrow {
         let wrong_sig = schnorr_sign(&tx, &utxo, &wrong_kp);
         let seller_sig = schnorr_sign(&tx, &utxo, &s.seller_kp);
         tx.inputs[0].signature_script =
-            build_multisig_sig_script(vec![wrong_sig, seller_sig], &s.redeem);
+            build_multisig_sig_script(vec![wrong_sig, seller_sig], &s.redeem).unwrap();
 
         assert!(verify_script(&tx, &utxo).is_err());
     }
@@ -176,7 +176,8 @@ mod multisig_escrow {
         );
         let b_sig = schnorr_sign(&tx, &utxo, &s.buyer_kp);
         let s_sig = schnorr_sign(&tx, &utxo, &s.seller_kp);
-        tx.inputs[0].signature_script = build_multisig_sig_script(vec![b_sig, s_sig], &s.redeem);
+        tx.inputs[0].signature_script =
+            build_multisig_sig_script(vec![b_sig, s_sig], &s.redeem).unwrap();
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }
@@ -194,7 +195,8 @@ mod multisig_escrow {
         );
         let b_sig = schnorr_sign(&tx, &utxo, &s.buyer_kp);
         let a_sig = schnorr_sign(&tx, &utxo, &s.arb_kp);
-        tx.inputs[0].signature_script = build_multisig_sig_script(vec![b_sig, a_sig], &s.redeem);
+        tx.inputs[0].signature_script =
+            build_multisig_sig_script(vec![b_sig, a_sig], &s.redeem).unwrap();
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }
@@ -212,7 +214,8 @@ mod multisig_escrow {
         );
         let s_sig = schnorr_sign(&tx, &utxo, &s.seller_kp);
         let a_sig = schnorr_sign(&tx, &utxo, &s.arb_kp);
-        tx.inputs[0].signature_script = build_multisig_sig_script(vec![s_sig, a_sig], &s.redeem);
+        tx.inputs[0].signature_script =
+            build_multisig_sig_script(vec![s_sig, a_sig], &s.redeem).unwrap();
 
         assert!(verify_script(&tx, &utxo).is_ok());
     }

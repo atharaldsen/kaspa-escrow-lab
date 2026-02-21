@@ -7,7 +7,7 @@ use kaspa_txscript::{
     standard::multisig_redeem_script,
 };
 
-use super::error::EscrowError;
+use crate::error::EscrowError;
 
 /// Safely cast u64 to i64 for script data, returning an error if the value overflows.
 fn safe_i64(value: u64, context: &str) -> Result<i64, EscrowError> {

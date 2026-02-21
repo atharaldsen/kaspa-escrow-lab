@@ -31,8 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (i, e) in utxos.iter().take(5).enumerate() {
                     println!(
                         "  [{}] tx:{} idx:{} amount:{} coinbase:{}",
-                        i, e.outpoint.transaction_id, e.outpoint.index,
-                        e.utxo_entry.amount, e.utxo_entry.is_coinbase,
+                        i,
+                        e.outpoint.transaction_id,
+                        e.outpoint.index,
+                        e.utxo_entry.amount,
+                        e.utxo_entry.is_coinbase,
                     );
                 }
                 if utxos.len() > 5 {

@@ -94,9 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let data = std::fs::read_to_string(keys_path)?;
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
-    let buyer_secret = hex::decode(parsed["buyer_secret"].as_str().unwrap())?;
-    let buyer_kp =
-        secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &buyer_secret)?;
+    let buyer_secret = hex::decode(
+        parsed["buyer_secret"]
+            .as_str()
+            .ok_or("missing buyer_secret in keys JSON")?,
+    )?;
+    let buyer_kp = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &buyer_secret)?;
     let buyer_pk = buyer_kp.x_only_public_key().0.serialize();
     let buyer_addr = testnet_address(&buyer_pk);
     println!("  Buyer address: {}", buyer_addr);
@@ -139,10 +142,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if mature && entry.utxo_entry.amount >= 100_000_000 {
                         // >= 1 KAS
                         // Find which key matches this UTXO
-                        let utxo_addr_str =
-                            entry.address.as_ref().map(|a| a.to_string()).unwrap_or_default();
-                        if let Some(key_idx) =
-                            keys.iter().position(|k| k.address.to_string() == utxo_addr_str)
+                        let utxo_addr_str = entry
+                            .address
+                            .as_ref()
+                            .map(|a| a.to_string())
+                            .unwrap_or_default();
+                        if let Some(key_idx) = keys
+                            .iter()
+                            .position(|k| k.address.to_string() == utxo_addr_str)
                         {
                             let dk = keys.remove(key_idx);
                             println!(
@@ -168,10 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Progress indicator
                 if batch_start == 0 {
-                    eprint!(
-                        "  Scanning account {} {}",
-                        account, type_name
-                    );
+                    eprint!("  Scanning account {} {}", account, type_name);
                 }
                 eprint!(".");
             }
@@ -193,8 +197,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No funded wallet address found".into());
     }
 
-    let dk = funded_key.unwrap();
-    let (outpoint, utxo_amount) = funded_utxo.unwrap();
+    let dk = funded_key.expect("checked above");
+    let (outpoint, utxo_amount) = funded_utxo.expect("checked above");
 
     // ── Step 4: Build and submit funding tx ────────────────────────
     print_step(4, "Building funding transaction...");
@@ -214,7 +218,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         script_public_key: pay_to_address_script(&buyer_addr),
         covenant: None,
     };
-    let tx = Transaction::new(1, vec![input], vec![output], 0, Default::default(), 0, vec![]);
+    let tx = Transaction::new(
+        1,
+        vec![input],
+        vec![output],
+        0,
+        Default::default(),
+        0,
+        vec![],
+    );
 
     let wallet_spk = pay_to_address_script(&dk.address);
     let utxo_entry =

@@ -6,9 +6,9 @@ use kaspa_txscript::{
     script_builder::ScriptBuilder,
 };
 
-use super::error::EscrowError;
-use super::escrow::{EscrowConfig, EscrowPattern};
-use crate::{build_p2pk_sig_script, p2pk_spk};
+use crate::error::EscrowError;
+use crate::escrow::{EscrowConfig, EscrowPattern};
+use crate::helpers::{build_p2pk_sig_script, p2pk_spk};
 
 /// Which branch of the escrow script to execute.
 #[derive(Debug, Clone)]

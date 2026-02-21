@@ -1,3 +1,6 @@
+[workspace]
+members = ["sdk"]
+
 [package]
 name = "kaspa-escrow-lab"
 version = "0.1.0"
@@ -7,6 +10,8 @@ description = "Experimental escrow and covenant patterns on Kaspa Testnet 12"
 license = "MIT"
 
 [dependencies]
+# SDK crate (extracted)
+kaspa-escrow-sdk = { path = "sdk" }
 # Kaspa core crates - from the tn12 branch (covenant/KIP-10/KIP-17 support)
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
 kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
@@ -38,6 +43,18 @@ anyhow = "1"
 
 # Hex encoding
 hex = "0.4"
+
+# REST API
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[[bin]]
+name = "api"
+path = "src/bin/api.rs"
 
 [[example]]
 name = "basic_escrow"
@@ -90,3 +107,7 @@ path = "examples/check_utxo.rs"
 [[example]]
 name = "fund_escrow"
 path = "examples/fund_escrow.rs"
+
+[[example]]
+name = "live_sdk_escrow_full"
+path = "examples/live_sdk_escrow_full.rs"

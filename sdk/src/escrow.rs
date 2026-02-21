@@ -1,9 +1,13 @@
 use kaspa_consensus_core::tx::ScriptPublicKey;
 use kaspa_txscript::pay_to_script_hash_script;
 
-use super::error::EscrowError;
-use super::script;
-use crate::{p2pk_spk, spk_to_bytes};
+use crate::error::EscrowError;
+use crate::helpers::{p2pk_spk, spk_to_bytes};
+use crate::script;
+
+/// Buffer subtracted from escrow_amount for covenant minimum refund,
+/// leaving room for the transaction fee (~200-byte tx).
+const COVENANT_FEE_BUFFER: u64 = 10_000;
 
 /// High-level escrow pattern selection.
 #[derive(Debug, Clone)]
@@ -152,9 +156,7 @@ impl EscrowBuilder {
                 })?;
                 let buyer_spk = p2pk_spk(&buyer_pk);
                 let buyer_spk_bytes = spk_to_bytes(&buyer_spk);
-                // The covenant minimum must be less than escrow_amount to leave room
-                // for the transaction fee. Use 10k sompi buffer (covers ~200-byte tx).
-                let min_refund = escrow_amount.saturating_sub(10_000);
+                let min_refund = escrow_amount.saturating_sub(COVENANT_FEE_BUFFER);
                 script::build_covenant_multipath_script(
                     &buyer_pk,
                     &seller_pk,

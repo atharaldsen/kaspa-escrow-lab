@@ -21,9 +21,9 @@ use kaspa_txscript::{
     pay_to_address_script, pay_to_script_hash_script, standard::multisig_redeem_script,
 };
 use kaspa_wrpc_client::prelude::*;
-use std::time::Duration;
-use serde_json;
 use secp256k1;
+use serde_json;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,8 +54,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (buyer_kp, buyer_pk, seller_kp, seller_pk) = if keys_path.exists() {
         let data = std::fs::read_to_string(keys_path)?;
         let parsed: serde_json::Value = serde_json::from_str(&data)?;
-        let buyer_secret = hex::decode(parsed["buyer_secret"].as_str().unwrap())?;
-        let seller_secret = hex::decode(parsed["seller_secret"].as_str().unwrap())?;
+        let buyer_secret = hex::decode(
+            parsed["buyer_secret"]
+                .as_str()
+                .ok_or("missing buyer_secret in keys JSON")?,
+        )?;
+        let seller_secret = hex::decode(
+            parsed["seller_secret"]
+                .as_str()
+                .ok_or("missing seller_secret in keys JSON")?,
+        )?;
         let buyer_kp = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &buyer_secret)?;
         let seller_kp =
             secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &seller_secret)?;
@@ -258,7 +266,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let buyer_sig = schnorr_sign(&release_tx, &escrow_utxo, &buyer_kp);
     let seller_sig = schnorr_sign(&release_tx, &escrow_utxo, &seller_kp);
 
-    let sig_script = build_multisig_sig_script(vec![buyer_sig, seller_sig], &redeem_script);
+    let sig_script =
+        build_multisig_sig_script(vec![buyer_sig, seller_sig], &redeem_script).unwrap();
 
     let mut signed_release_tx = release_tx;
     signed_release_tx.inputs[0].signature_script = sig_script;

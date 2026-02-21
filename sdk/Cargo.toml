@@ -1,0 +1,31 @@
+[package]
+name = "kaspa-escrow-sdk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+description = "Escrow and covenant SDK for Kaspa"
+license = "MIT"
+
+[dependencies]
+# Kaspa core crates - from the tn12 branch (covenant/KIP-10/KIP-17 support)
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+
+# For RPC connection (UTXO compounding)
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "tn12" }
+
+# Async runtime (compound_utxos is async)
+tokio = { version = "1", features = ["full"] }
+
+# Cryptography (match rusty-kaspa's versions)
+secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
+
+# Error handling (thiserror 1.x to match rusty-kaspa)
+thiserror = "1"
+
+# Hex encoding (for script disassembly/debug)
+hex = "0.4"

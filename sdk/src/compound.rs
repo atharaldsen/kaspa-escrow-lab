@@ -9,8 +9,15 @@ use kaspa_wrpc_client::prelude::RpcApi;
 use secp256k1::Keypair;
 use std::time::Duration;
 
-use super::error::EscrowError;
-use crate::schnorr_sign_input;
+use crate::error::EscrowError;
+use crate::helpers::schnorr_sign_input;
+
+/// Estimated bytes per transaction input for fee calculation.
+const ESTIMATED_BYTES_PER_INPUT: u64 = 150;
+/// Estimated fixed overhead bytes (output + header) for fee calculation.
+const ESTIMATED_BYTES_OVERHEAD: u64 = 100;
+/// Minimum fee in sompi for any compound transaction.
+const MIN_FEE_SOMPI: u64 = 5000;
 
 /// Compound many UTXOs into fewer, larger ones.
 ///
@@ -93,11 +100,9 @@ pub async fn compound_utxos(
                 .ok_or_else(|| EscrowError::InvalidConfig("UTXO total overflows u64".into()))?;
         }
 
-        // Estimate fee: ~150 bytes per input + ~50 bytes output + ~50 bytes overhead
-        // mass_per_tx_byte = 1, so mass ~= byte count
-        // fee = mass (at minimum relay rate of 1000/1000 = 1 sompi/gram)
-        let estimated_mass = (batch.len() as u64) * 150 + 100;
-        let fee = estimated_mass.max(5000); // minimum 5000 sompi
+        let estimated_mass =
+            (batch.len() as u64) * ESTIMATED_BYTES_PER_INPUT + ESTIMATED_BYTES_OVERHEAD;
+        let fee = estimated_mass.max(MIN_FEE_SOMPI);
 
         if total_amount <= fee {
             continue;
@@ -114,7 +119,7 @@ pub async fn compound_utxos(
         // Sign each input
         let mut signed_tx = tx;
         for i in 0..batch.len() {
-            let sig = schnorr_sign_input(&signed_tx, &utxo_entries, keypair, i);
+            let sig = schnorr_sign_input(&signed_tx, &utxo_entries, keypair, i)?;
             let mut sig_script = Vec::with_capacity(1 + sig.len());
             sig_script.push(kaspa_txscript::opcodes::codes::OpData65);
             sig_script.extend_from_slice(&sig);

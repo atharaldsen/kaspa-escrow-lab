@@ -1,4 +1,9 @@
-pub mod sdk;
+pub mod api;
+
+// Re-export the SDK crate for backward compatibility.
+// `use kaspa_escrow_lab::sdk::{EscrowBuilder, ...}` still works.
+pub use kaspa_escrow_sdk as sdk;
+pub use kaspa_escrow_sdk::{build_p2pk_sig_script, p2pk_spk, schnorr_sign_input, spk_to_bytes};
 
 use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::{
@@ -11,7 +16,7 @@ use kaspa_consensus_core::{
         TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry,
     },
 };
-use kaspa_txscript::{EngineCtx, TxScriptEngine, caches::Cache, pay_to_address_script};
+use kaspa_txscript::{EngineCtx, TxScriptEngine, caches::Cache};
 use rand::thread_rng;
 use secp256k1::Keypair;
 
@@ -25,17 +30,6 @@ pub fn generate_keypair() -> (Keypair, [u8; 32]) {
 /// Create a testnet P2PK address from a 32-byte x-only public key.
 pub fn testnet_address(pubkey: &[u8; 32]) -> Address {
     Address::new(Prefix::Testnet, Version::PubKey, pubkey.as_slice())
-}
-
-/// Convert a ScriptPublicKey to the byte representation that
-/// OpTxInputSpk/OpTxOutputSpk push onto the stack: 2-byte BE version + script bytes.
-pub fn spk_to_bytes(spk: &ScriptPublicKey) -> Vec<u8> {
-    let version = spk.version.to_be_bytes();
-    let script = spk.script();
-    let mut v = Vec::with_capacity(version.len() + script.len());
-    v.extend_from_slice(&version);
-    v.extend_from_slice(script);
-    v
 }
 
 /// Build a mock transaction for local script verification.
@@ -102,45 +96,8 @@ pub fn schnorr_sign(tx: &Transaction, utxo_entry: &UtxoEntry, keypair: &Keypair)
     let mtx = MutableTransaction::with_entries(tx.clone(), vec![utxo_entry.clone()]);
     let sig_hash =
         calc_schnorr_signature_hash(&mtx.as_verifiable(), 0, SIG_HASH_ALL, &reused_values);
-    let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
-    let sig = keypair.sign_schnorr(msg);
-    let mut signature = Vec::with_capacity(65);
-    signature.extend_from_slice(sig.as_ref().as_slice());
-    signature.push(SIG_HASH_ALL.to_u8());
-    signature
-}
-
-/// Sign a specific transaction input with a Schnorr keypair.
-/// For multi-input transactions (e.g. UTXO compounding).
-/// Returns the 65-byte signature (64-byte sig + SIG_HASH_ALL byte).
-///
-/// # Panics
-/// Panics if `input_index` is out of bounds for the transaction inputs or UTXO entries.
-pub fn schnorr_sign_input(
-    tx: &Transaction,
-    utxo_entries: &[UtxoEntry],
-    keypair: &Keypair,
-    input_index: usize,
-) -> Vec<u8> {
-    assert!(
-        input_index < tx.inputs.len(),
-        "input_index {input_index} out of bounds for {} inputs",
-        tx.inputs.len()
-    );
-    assert!(
-        input_index < utxo_entries.len(),
-        "input_index {input_index} out of bounds for {} UTXO entries",
-        utxo_entries.len()
-    );
-    let reused_values = SigHashReusedValuesUnsync::new();
-    let mtx = MutableTransaction::with_entries(tx.clone(), utxo_entries.to_vec());
-    let sig_hash = calc_schnorr_signature_hash(
-        &mtx.as_verifiable(),
-        input_index,
-        SIG_HASH_ALL,
-        &reused_values,
-    );
-    let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
+    let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice())
+        .expect("sig hash is always 32 bytes");
     let sig = keypair.sign_schnorr(msg);
     let mut signature = Vec::with_capacity(65);
     signature.extend_from_slice(sig.as_ref().as_slice());
@@ -149,24 +106,23 @@ pub fn schnorr_sign_input(
 }
 
 /// Execute the script engine on a specific input index and return Ok(()) or an error string.
-///
-/// # Panics
-/// Panics if `input_index` is out of bounds for the transaction inputs or UTXO entries.
 pub fn verify_script_input(
     tx: &Transaction,
     utxo_entries: &[UtxoEntry],
     input_index: usize,
 ) -> Result<(), String> {
-    assert!(
-        input_index < tx.inputs.len(),
-        "input_index {input_index} out of bounds for {} inputs",
-        tx.inputs.len()
-    );
-    assert!(
-        input_index < utxo_entries.len(),
-        "input_index {input_index} out of bounds for {} UTXO entries",
-        utxo_entries.len()
-    );
+    if input_index >= tx.inputs.len() {
+        return Err(format!(
+            "input_index {input_index} out of bounds for {} inputs",
+            tx.inputs.len()
+        ));
+    }
+    if input_index >= utxo_entries.len() {
+        return Err(format!(
+            "input_index {input_index} out of bounds for {} UTXO entries",
+            utxo_entries.len()
+        ));
+    }
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
     let ctx = EngineCtx::new(&sig_cache).with_reused(&reused_values);
@@ -182,24 +138,9 @@ pub fn verify_script_input(
     vm.execute().map_err(|e| format!("{:?}", e))
 }
 
-/// Create a P2PK ScriptPublicKey for a testnet address from an x-only pubkey.
-pub fn p2pk_spk(pubkey: &[u8; 32]) -> ScriptPublicKey {
-    pay_to_address_script(&testnet_address(pubkey))
-}
-
-/// Build a P2PK signature script from a 65-byte Schnorr signature.
-/// Format: `<OpData65><signature>`
-pub fn build_p2pk_sig_script(signature: &[u8]) -> Vec<u8> {
-    use kaspa_txscript::opcodes::codes::OpData65;
-    let mut script = Vec::with_capacity(1 + signature.len());
-    script.push(OpData65);
-    script.extend_from_slice(signature);
-    script
-}
-
 /// Build a multisig signature script from multiple 65-byte signatures and a redeem script.
 /// Format: `<OpData65><sig1> <OpData65><sig2> ... <serialized_redeem_script>`
-pub fn build_multisig_sig_script(sigs: Vec<Vec<u8>>, redeem: &[u8]) -> Vec<u8> {
+pub fn build_multisig_sig_script(sigs: Vec<Vec<u8>>, redeem: &[u8]) -> Result<Vec<u8>, String> {
     use kaspa_txscript::opcodes::codes::OpData65;
     use kaspa_txscript::script_builder::ScriptBuilder;
     let mut script = Vec::new();
@@ -207,8 +148,12 @@ pub fn build_multisig_sig_script(sigs: Vec<Vec<u8>>, redeem: &[u8]) -> Vec<u8> {
         script.push(OpData65);
         script.extend_from_slice(sig);
     }
-    script.extend_from_slice(&ScriptBuilder::new().add_data(redeem).unwrap().drain());
-    script
+    let redeem_data = ScriptBuilder::new()
+        .add_data(redeem)
+        .map_err(|e| format!("failed to serialize redeem script: {e}"))?
+        .drain();
+    script.extend_from_slice(&redeem_data);
+    Ok(script)
 }
 
 /// Disassemble a script into human-readable opcode notation.

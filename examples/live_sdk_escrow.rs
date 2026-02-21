@@ -152,12 +152,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (buyer_kp, buyer_pk, seller_kp, seller_pk, owner_pk, fee_pk) = if keys_path.exists() {
         let data = std::fs::read_to_string(keys_path)?;
         let v: serde_json::Value = serde_json::from_str(&data)?;
-        let load_kp = |field: &str| -> Result<(secp256k1::Keypair, [u8; 32]), Box<dyn std::error::Error>> {
-            let secret = hex::decode(v[field].as_str().ok_or(format!("missing {field}"))?)?;
-            let kp = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &secret)?;
-            let pk = kp.x_only_public_key().0.serialize();
-            Ok((kp, pk))
-        };
+        let load_kp =
+            |field: &str| -> Result<(secp256k1::Keypair, [u8; 32]), Box<dyn std::error::Error>> {
+                let secret = hex::decode(v[field].as_str().ok_or(format!("missing {field}"))?)?;
+                let kp = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &secret)?;
+                let pk = kp.x_only_public_key().0.serialize();
+                Ok((kp, pk))
+            };
         let load_pk = |field: &str| -> Result<[u8; 32], Box<dyn std::error::Error>> {
             let bytes = hex::decode(v[field].as_str().ok_or(format!("missing {field}"))?)?;
             Ok(bytes.try_into().map_err(|_| "bad pk length")?)
@@ -198,8 +199,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let current_daa = info.virtual_daa_score;
     let already_funded = buyer_utxos.iter().any(|e| {
-        let mature = !e.utxo_entry.is_coinbase
-            || current_daa >= e.utxo_entry.block_daa_score + 1000;
+        let mature =
+            !e.utxo_entry.is_coinbase || current_daa >= e.utxo_entry.block_daa_score + 1000;
         mature && e.utxo_entry.amount >= 100_000_000
     });
 
@@ -235,8 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ok && e.utxo_entry.amount >= 100_000_000
                 });
                 if let Some(entry) = mature {
-                    let wallet_kp =
-                        secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, sk);
+                    let wallet_kp = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, sk);
                     let utxo_amount = entry.utxo_entry.amount;
                     let op = TransactionOutpoint::new(
                         entry.outpoint.transaction_id,
