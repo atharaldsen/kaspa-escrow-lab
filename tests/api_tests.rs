@@ -9,7 +9,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use kaspa_consensus_core::tx::TransactionOutpoint;
-use kaspa_escrow_lab::api::{AppState, EscrowEntry, SignerMode, build_router};
+use kaspa_escrow_lab::api::{
+    AppState, EscrowEntry, SignerMode, SweepAction, build_router, classify_for_sweep,
+};
 use kaspa_escrow_lab::sdk::{EscrowBuilder, EscrowPattern};
 use kaspa_escrow_lab::*;
 use kaspa_wrpc_client::KaspaRpcClient;
@@ -122,6 +124,72 @@ async fn insert_funded_escrow(state: &AppState, pattern: EscrowPattern) -> Strin
         refund_tx_id: None,
         dispute_tx_id: None,
         escape_tx_id: None,
+        expired: false,
+        auto_refund_failures: 0,
+    };
+
+    state.escrows.lock().await.insert(id.clone(), entry);
+    id
+}
+
+/// Insert a pre-funded escrow with a specific signer mode (for sweeper tests).
+async fn insert_funded_escrow_with_mode(
+    state: &AppState,
+    pattern: EscrowPattern,
+    mode: SignerMode,
+) -> String {
+    let (buyer_kp, buyer_pk) = generate_keypair();
+    let (seller_kp, seller_pk) = generate_keypair();
+
+    let mut builder = EscrowBuilder::new(pattern.clone())
+        .buyer(buyer_pk)
+        .seller(seller_pk)
+        .amount(1_000_000_000);
+
+    if matches!(
+        pattern,
+        EscrowPattern::Arbitrated | EscrowPattern::CovenantMultiPath { .. }
+    ) {
+        let (_kp, pk) = generate_keypair();
+        builder = builder.arbitrator(pk);
+    }
+    if matches!(pattern, EscrowPattern::PaymentSplit { .. }) {
+        let (_kp, pk) = generate_keypair();
+        builder = builder.owner(pk);
+        let (_kp2, pk2) = generate_keypair();
+        builder = builder.fee_address(pk2);
+    }
+
+    let config = builder.build().expect("valid config");
+    let id = uuid::Uuid::new_v4().to_string();
+    let buyer_addr = testnet_address(&buyer_pk);
+
+    let entry = EscrowEntry {
+        id: id.clone(),
+        config,
+        mode,
+        buyer_kp: if mode == SignerMode::Custodial {
+            Some(buyer_kp)
+        } else {
+            None
+        },
+        seller_kp: if mode == SignerMode::Custodial {
+            Some(seller_kp)
+        } else {
+            None
+        },
+        arbitrator_kp: None,
+        owner_kp: None,
+        buyer_addr,
+        funding_tx_id: Some("abcd1234".to_string()),
+        funding_outpoint: Some(TransactionOutpoint::new(Default::default(), 0)),
+        funding_amount: Some(1_000_000_000),
+        release_tx_id: None,
+        refund_tx_id: None,
+        dispute_tx_id: None,
+        escape_tx_id: None,
+        expired: false,
+        auto_refund_failures: 0,
     };
 
     state.escrows.lock().await.insert(id.clone(), entry);
@@ -561,4 +629,217 @@ async fn fee_zero() {
     let (status, json) = post_json(app, &format!("/escrow/{id}/release"), r#"{"fee":0}"#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["error"].as_str().unwrap().contains("fee must be > 0"));
+}
+
+// ─── Expiration / sweeper tests ────────────────────────────
+
+#[tokio::test]
+async fn expired_status_shows_in_get() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::TimeLocked { lock_time: 100 }).await;
+
+    // Mark as expired manually (simulates sweeper action)
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.expired = true;
+    }
+
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["status"].as_str().unwrap().starts_with("expired"),
+        "expected expired status, got: {}",
+        json["status"]
+    );
+}
+
+#[tokio::test]
+async fn expired_escrow_still_accepts_refund() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::TimeLocked { lock_time: 100 }).await;
+
+    // Mark as expired
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.expired = true;
+    }
+
+    // POST refund should NOT be rejected as "already settled"
+    // (it will fail at RPC since client is unconnected, but that's after validation)
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/refund"), r#"{"fee":5000}"#).await;
+    // Should fail at RPC (500), not at "already settled" (409)
+    assert_ne!(
+        status,
+        StatusCode::CONFLICT,
+        "expired escrow should not be rejected as settled: {}",
+        json["error"]
+    );
+}
+
+#[tokio::test]
+async fn expires_at_daa_present_for_timelocked() {
+    let state = test_state();
+    let (_, created) = create_escrow(
+        &state,
+        r#"{"pattern":"timelocked","amount":1000000,"lock_time":99999}"#,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["expires_at_daa"], 99999);
+}
+
+#[tokio::test]
+async fn expires_at_daa_present_for_covenant() {
+    let state = test_state();
+    let (_, created) = create_escrow(
+        &state,
+        r#"{"pattern":"covenant_multi_path","amount":1000000,"lock_time":55555}"#,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let app = build_router(state);
+    let (_, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(json["expires_at_daa"], 55555);
+}
+
+#[tokio::test]
+async fn expires_at_daa_absent_for_basic() {
+    let state = test_state();
+    let (_, created) = create_escrow(&state, r#"{"pattern":"basic","amount":1000000}"#).await;
+    let id = created["id"].as_str().unwrap();
+
+    let app = build_router(state);
+    let (_, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert!(json["expires_at_daa"].is_null());
+}
+
+// ─── classify_for_sweep tests ──────────────────────────────
+
+#[tokio::test]
+async fn classify_timelocked_custodial_auto_refund() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::TimeLocked { lock_time: 100 }).await;
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    // Not expired yet
+    assert!(classify_for_sweep(entry, 50).is_none());
+
+    // Expired: should be AutoRefund
+    let candidate = classify_for_sweep(entry, 200).expect("should be candidate");
+    assert!(matches!(candidate.action, SweepAction::AutoRefund));
+    assert_eq!(candidate.lock_time, 100);
+}
+
+#[tokio::test]
+async fn classify_timelocked_external_mark_expired() {
+    let state = test_state();
+    let id = insert_funded_escrow_with_mode(
+        &state,
+        EscrowPattern::TimeLocked { lock_time: 100 },
+        SignerMode::External,
+    )
+    .await;
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    let candidate = classify_for_sweep(entry, 200).expect("should be candidate");
+    assert!(matches!(candidate.action, SweepAction::MarkExpired));
+}
+
+#[tokio::test]
+async fn classify_covenant_any_mode_auto_refund() {
+    let state = test_state();
+    let id = insert_funded_escrow_with_mode(
+        &state,
+        EscrowPattern::CovenantMultiPath { lock_time: 100 },
+        SignerMode::External,
+    )
+    .await;
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    let candidate = classify_for_sweep(entry, 200).expect("should be candidate");
+    assert!(matches!(candidate.action, SweepAction::AutoRefund));
+}
+
+#[tokio::test]
+async fn classify_not_expired_yet() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::TimeLocked { lock_time: 1000 }).await;
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    assert!(classify_for_sweep(entry, 999).is_none());
+}
+
+#[tokio::test]
+async fn classify_basic_not_eligible() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    assert!(classify_for_sweep(entry, 999999).is_none());
+}
+
+#[tokio::test]
+async fn classify_already_settled_skipped() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::TimeLocked { lock_time: 100 }).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.refund_tx_id = Some("already-refunded".to_string());
+    }
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+    assert!(classify_for_sweep(entry, 200).is_none());
+}
+
+#[tokio::test]
+async fn classify_already_expired_skipped() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::TimeLocked { lock_time: 100 }).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.expired = true;
+    }
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+    assert!(classify_for_sweep(entry, 200).is_none());
+}
+
+#[tokio::test]
+async fn classify_unfunded_skipped() {
+    let state = test_state();
+    let (_, created) = create_escrow(
+        &state,
+        r#"{"pattern":"timelocked","amount":1000000,"lock_time":100}"#,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(id).unwrap();
+    assert!(classify_for_sweep(entry, 200).is_none());
 }

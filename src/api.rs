@@ -47,7 +47,6 @@ pub enum SignerMode {
     External,
 }
 
-#[allow(dead_code)] // owner_kp stored for future escape-path endpoint
 pub struct EscrowEntry {
     pub id: String,
     pub config: EscrowConfig,
@@ -64,6 +63,8 @@ pub struct EscrowEntry {
     pub refund_tx_id: Option<String>,
     pub dispute_tx_id: Option<String>,
     pub escape_tx_id: Option<String>,
+    pub expired: bool,
+    pub auto_refund_failures: u32,
 }
 
 // ─── Request / Response DTOs ─────────────────────────────────
@@ -132,6 +133,8 @@ struct StatusResponse {
     dispute_tx_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     escape_tx_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at_daa: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -303,6 +306,8 @@ fn compute_status(entry: &EscrowEntry) -> &'static str {
         "disputed"
     } else if entry.escape_tx_id.is_some() {
         "escaped"
+    } else if entry.expired {
+        "expired"
     } else if entry.funding_tx_id.is_some() {
         "locked"
     } else {
@@ -367,6 +372,267 @@ async fn submit_with_retry(
         }
     }
     unreachable!()
+}
+
+// ─── Sweeper ────────────────────────────────────────────────
+
+/// Default fee for auto-refund transactions submitted by the sweeper.
+const SWEEPER_FEE: u64 = 5_000;
+
+/// Maximum consecutive auto-refund failures before marking as expired.
+const MAX_AUTO_REFUND_FAILURES: u32 = 3;
+
+/// What the sweeper should do with an expired escrow.
+#[derive(Debug)]
+pub enum SweepAction {
+    /// Build and submit a refund TX (CovenantMultiPath any mode, TimeLocked custodial).
+    AutoRefund,
+    /// Mark as expired (TimeLocked external — can't sign without buyer's key).
+    MarkExpired,
+}
+
+/// Data extracted from an EscrowEntry for processing outside the lock.
+pub struct SweepCandidate {
+    pub id: String,
+    pub lock_time: u64,
+    pub action: SweepAction,
+    config: EscrowConfig,
+    escrow_outpoint: TransactionOutpoint,
+    on_chain_value: u64,
+    buyer_kp: Option<secp256k1::Keypair>,
+}
+
+/// Classify an escrow entry for sweeping. Returns None if not a candidate.
+pub fn classify_for_sweep(entry: &EscrowEntry, current_daa: u64) -> Option<SweepCandidate> {
+    // Must be funded, not settled, not already expired
+    if entry.funding_tx_id.is_none() || is_settled(entry) || entry.expired {
+        return None;
+    }
+
+    let lock_time = match &entry.config.pattern {
+        EscrowPattern::TimeLocked { lock_time } => *lock_time,
+        EscrowPattern::CovenantMultiPath { lock_time } => *lock_time,
+        _ => return None, // Basic, Arbitrated, PaymentSplit don't expire
+    };
+
+    if current_daa < lock_time {
+        return None; // Not expired yet
+    }
+
+    let action = match (&entry.config.pattern, entry.mode) {
+        (EscrowPattern::CovenantMultiPath { .. }, _) => SweepAction::AutoRefund,
+        (EscrowPattern::TimeLocked { .. }, SignerMode::Custodial) => SweepAction::AutoRefund,
+        (EscrowPattern::TimeLocked { .. }, SignerMode::External) => SweepAction::MarkExpired,
+        _ => return None,
+    };
+
+    let escrow_outpoint = match entry.funding_outpoint {
+        Some(op) => op,
+        None => {
+            eprintln!(
+                "[sweeper] Invariant violation: {} has funding_tx_id but no funding_outpoint",
+                entry.id
+            );
+            return None;
+        }
+    };
+    let on_chain_value = match entry.funding_amount {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "[sweeper] Invariant violation: {} has funding_tx_id but no funding_amount",
+                entry.id
+            );
+            return None;
+        }
+    };
+
+    Some(SweepCandidate {
+        id: entry.id.clone(),
+        lock_time,
+        action,
+        config: entry.config.clone(),
+        escrow_outpoint,
+        on_chain_value,
+        buyer_kp: entry.buyer_kp,
+    })
+}
+
+/// Run a single sweep pass: check all escrows for expiration and auto-refund.
+pub async fn sweep_expired_escrows(state: &AppState) {
+    // Step 1: Get current DAA score.
+    let current_daa = match state.client.get_block_dag_info().await {
+        Ok(info) => info.virtual_daa_score,
+        Err(e) => {
+            eprintln!("[sweeper] RPC error getting DAA score: {e}");
+            return;
+        }
+    };
+
+    // Step 2: Under lock, collect candidates for auto-refund.
+    let candidates: Vec<SweepCandidate> = {
+        let escrows = state.escrows.lock().await;
+        escrows
+            .values()
+            .filter_map(|entry| classify_for_sweep(entry, current_daa))
+            .collect()
+    }; // lock dropped
+
+    // Step 3: Process each candidate outside the lock.
+    for candidate in candidates {
+        match candidate.action {
+            SweepAction::AutoRefund => {
+                process_auto_refund(state, &candidate, current_daa).await;
+            }
+            SweepAction::MarkExpired => {
+                let mut escrows = state.escrows.lock().await;
+                if let Some(entry) = escrows.get_mut(&candidate.id)
+                    && !is_settled(entry)
+                    && !entry.expired
+                {
+                    entry.expired = true;
+                    eprintln!(
+                        "[sweeper] Marked {} as expired (TimeLocked+External, \
+                         lock_time={}, current_daa={})",
+                        candidate.id, candidate.lock_time, current_daa
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Attempt to auto-refund a single escrow.
+async fn process_auto_refund(state: &AppState, candidate: &SweepCandidate, current_daa: u64) {
+    // Build the refund TX
+    let refund_tx = match build_refund_tx(
+        candidate.escrow_outpoint,
+        &candidate.config,
+        current_daa,
+        SWEEPER_FEE,
+    ) {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!(
+                "[sweeper] Failed to build refund TX for {}: {e}",
+                candidate.id
+            );
+            increment_failure_count(state, &candidate.id).await;
+            return;
+        }
+    };
+
+    let escrow_utxo = UtxoEntry::new(
+        candidate.on_chain_value,
+        candidate.config.p2sh_spk.clone(),
+        0,
+        false,
+        None,
+    );
+
+    let is_timelocked = matches!(candidate.config.pattern, EscrowPattern::TimeLocked { .. });
+
+    let sigs: Vec<Vec<u8>> = if is_timelocked {
+        // TimeLocked custodial: sign with buyer's key
+        match &candidate.buyer_kp {
+            Some(kp) => vec![schnorr_sign(&refund_tx, &escrow_utxo, kp)],
+            None => {
+                eprintln!(
+                    "[sweeper] No buyer keypair for custodial TimeLocked {}",
+                    candidate.id
+                );
+                increment_failure_count(state, &candidate.id).await;
+                return;
+            }
+        }
+    } else {
+        vec![] // CovenantMultiPath: no sigs needed
+    };
+
+    let sig_script = match build_sig_script(
+        &Branch::Timeout,
+        &sigs,
+        &candidate.config.redeem_script,
+        &candidate.config.pattern,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[sweeper] Failed to build sig script for {}: {e}",
+                candidate.id
+            );
+            increment_failure_count(state, &candidate.id).await;
+            return;
+        }
+    };
+
+    let mut tx = refund_tx;
+    tx.inputs[0].signature_script = sig_script;
+
+    // Verify locally before submitting
+    if let Err(e) = verify_script(&tx, &escrow_utxo) {
+        eprintln!(
+            "[sweeper] Script verification failed for {}: {e}",
+            candidate.id
+        );
+        increment_failure_count(state, &candidate.id).await;
+        return;
+    }
+
+    // Submit
+    let rpc_tx: RpcTransaction = (&tx).into();
+    match submit_with_retry(&state.client, rpc_tx).await {
+        Ok(tx_id) => {
+            // Re-lock to update state
+            let mut escrows = state.escrows.lock().await;
+            if let Some(entry) = escrows.get_mut(&candidate.id)
+                && !is_settled(entry)
+            {
+                entry.refund_tx_id = Some(tx_id.clone());
+                entry.auto_refund_failures = 0;
+                eprintln!("[sweeper] Auto-refunded {} (tx: {})", candidate.id, tx_id);
+            }
+        }
+        Err(e) => {
+            eprintln!("[sweeper] TX submission failed for {}: {e}", candidate.id);
+            increment_failure_count(state, &candidate.id).await;
+        }
+    }
+}
+
+/// Increment the failure counter; if it reaches MAX, mark as expired.
+async fn increment_failure_count(state: &AppState, id: &str) {
+    let mut escrows = state.escrows.lock().await;
+    if let Some(entry) = escrows.get_mut(id) {
+        entry.auto_refund_failures = entry.auto_refund_failures.saturating_add(1);
+        if entry.auto_refund_failures >= MAX_AUTO_REFUND_FAILURES {
+            entry.expired = true;
+            eprintln!(
+                "[sweeper] Marked {} as expired after {} consecutive failures",
+                id, entry.auto_refund_failures
+            );
+        }
+    }
+}
+
+/// Start the background sweeper loop.
+pub fn start_sweeper(
+    state: AppState,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            // Clone state (cheap — Arc internals) so spawned task is 'static.
+            // This catches panics so the sweeper survives unexpected errors.
+            let s = state.clone();
+            let result = tokio::task::spawn(async move { sweep_expired_escrows(&s).await }).await;
+            if let Err(e) = result {
+                eprintln!("[sweeper] Sweep pass panicked: {e}");
+            }
+        }
+    })
 }
 
 // ─── POST /escrow ────────────────────────────────────────────
@@ -533,6 +799,8 @@ async fn create_escrow(
         refund_tx_id: None,
         dispute_tx_id: None,
         escape_tx_id: None,
+        expired: false,
+        auto_refund_failures: 0,
     };
 
     state.escrows.lock().await.insert(id, entry);
@@ -552,6 +820,11 @@ async fn get_escrow(
         let entry = escrows
             .get(&id)
             .ok_or_else(|| not_found("escrow not found"))?;
+        let expires_at_daa = match &entry.config.pattern {
+            EscrowPattern::TimeLocked { lock_time } => Some(*lock_time),
+            EscrowPattern::CovenantMultiPath { lock_time } => Some(*lock_time),
+            _ => None,
+        };
         (
             entry.id.clone(),
             compute_status(entry).to_string(),
@@ -566,6 +839,7 @@ async fn get_escrow(
             entry.refund_tx_id.clone(),
             entry.dispute_tx_id.clone(),
             entry.escape_tx_id.clone(),
+            expires_at_daa,
         )
     };
     let (
@@ -582,6 +856,7 @@ async fn get_escrow(
         refund_tx_id,
         dispute_tx_id,
         escape_tx_id,
+        expires_at_daa,
     ) = snapshot;
 
     let mut current_daa = None;
@@ -612,6 +887,9 @@ async fn get_escrow(
     if status == "awaiting_funding" && rpc_error.is_some() {
         status = "awaiting_funding (node unreachable)".to_string();
     }
+    if status == "locked" && rpc_error.is_some() {
+        status = "locked (node unreachable)".to_string();
+    }
 
     Ok((
         StatusCode::OK,
@@ -630,6 +908,7 @@ async fn get_escrow(
             refund_tx_id,
             dispute_tx_id,
             escape_tx_id,
+            expires_at_daa,
         }),
     ))
 }
@@ -874,8 +1153,8 @@ async fn refund_escrow(
 ) -> ApiResult<TxResponse> {
     validate_fee(req.fee)?;
 
-    // Phase 1: Lock, validate, build + sign TX, drop lock.
-    let signed_refund = {
+    // Phase 1: Lock, validate, extract what we need, drop lock.
+    let (config, lock_time, escrow_outpoint, on_chain_value, buyer_kp, mode, ext_sig) = {
         let escrows = state.escrows.lock().await;
         let entry = escrows
             .get(&id)
@@ -888,7 +1167,7 @@ async fn refund_escrow(
             return Err(conflict("escrow already settled"));
         }
 
-        let lock_time = match &entry.config.pattern {
+        let lt = match &entry.config.pattern {
             EscrowPattern::TimeLocked { lock_time } => *lock_time,
             EscrowPattern::CovenantMultiPath { lock_time } => *lock_time,
             _ => {
@@ -898,72 +1177,84 @@ async fn refund_escrow(
             }
         };
 
-        // Check DAA (quick RPC, acceptable under lock)
-        let info = state
-            .client
-            .get_block_dag_info()
-            .await
-            .map_err(|e| internal(format!("RPC error: {e}")))?;
-        let current_daa = info.virtual_daa_score;
-
-        if current_daa < lock_time {
-            return Err(conflict(format!(
-                "timeout not yet available: current DAA {current_daa} < lock_time {lock_time}"
-            )));
-        }
-
-        let escrow_outpoint = entry
+        let outpoint = entry
             .funding_outpoint
             .ok_or_else(|| internal("missing funding outpoint"))?;
-        let on_chain_value = entry
+        let amount = entry
             .funding_amount
             .ok_or_else(|| internal("missing funding amount"))?;
-        let escrow_utxo = UtxoEntry::new(
-            on_chain_value,
-            entry.config.p2sh_spk.clone(),
-            0,
-            false,
-            None,
-        );
 
-        let refund_tx = build_refund_tx(escrow_outpoint, &entry.config, current_daa, req.fee)
-            .map_err(|e| bad_request(format!("{e}")))?;
-
-        let is_timelocked = matches!(entry.config.pattern, EscrowPattern::TimeLocked { .. });
-
-        let sigs: Vec<Vec<u8>> = if is_timelocked {
-            if entry.mode == SignerMode::Custodial {
-                let buyer_kp = entry
-                    .buyer_kp
-                    .as_ref()
-                    .ok_or_else(|| internal("no buyer keypair"))?;
-                vec![schnorr_sign(&refund_tx, &escrow_utxo, buyer_kp)]
-            } else {
-                let sig_hex = req.signature.as_ref().ok_or_else(|| {
-                    bad_request("signature required for timelocked refund in external mode")
-                })?;
-                vec![parse_hex_sig(sig_hex).map_err(bad_request)?]
-            }
+        // Parse external signature while we still have access to req
+        let sig = if entry.mode == SignerMode::External
+            && matches!(entry.config.pattern, EscrowPattern::TimeLocked { .. })
+        {
+            let sig_hex = req.signature.as_ref().ok_or_else(|| {
+                bad_request("signature required for timelocked refund in external mode")
+            })?;
+            Some(parse_hex_sig(sig_hex).map_err(bad_request)?)
         } else {
-            vec![] // CovenantMultiPath: no sigs
+            None
         };
 
-        let sig_script = build_sig_script(
-            &Branch::Timeout,
-            &sigs,
-            &entry.config.redeem_script,
-            &entry.config.pattern,
+        (
+            entry.config.clone(),
+            lt,
+            outpoint,
+            amount,
+            entry.buyer_kp,
+            entry.mode,
+            sig,
         )
+    }; // lock dropped
+
+    // Fetch DAA score outside the lock to avoid blocking other requests.
+    let current_daa = state
+        .client
+        .get_block_dag_info()
+        .await
+        .map_err(|e| internal(format!("RPC error: {e}")))?
+        .virtual_daa_score;
+
+    if current_daa < lock_time {
+        return Err(conflict(format!(
+            "timeout not yet available: current DAA {current_daa} < lock_time {lock_time}"
+        )));
+    }
+
+    // Build TX, sign, verify — all outside the lock.
+    let escrow_utxo = UtxoEntry::new(on_chain_value, config.p2sh_spk.clone(), 0, false, None);
+
+    let refund_tx = build_refund_tx(escrow_outpoint, &config, current_daa, req.fee)
         .map_err(|e| bad_request(format!("{e}")))?;
 
-        let mut tx = refund_tx;
-        tx.inputs[0].signature_script = sig_script;
+    let is_timelocked = matches!(config.pattern, EscrowPattern::TimeLocked { .. });
 
-        verify_script(&tx, &escrow_utxo)
-            .map_err(|e| bad_request(format!("verification failed: {e}")))?;
+    let sigs: Vec<Vec<u8>> = if is_timelocked {
+        if mode == SignerMode::Custodial {
+            let kp = buyer_kp
+                .as_ref()
+                .ok_or_else(|| internal("no buyer keypair"))?;
+            vec![schnorr_sign(&refund_tx, &escrow_utxo, kp)]
+        } else {
+            vec![ext_sig.ok_or_else(|| internal("missing external signature"))?]
+        }
+    } else {
+        vec![] // CovenantMultiPath: no sigs
+    };
 
-        tx
-    }; // lock dropped
+    let sig_script = build_sig_script(
+        &Branch::Timeout,
+        &sigs,
+        &config.redeem_script,
+        &config.pattern,
+    )
+    .map_err(|e| bad_request(format!("{e}")))?;
+
+    let mut signed_refund = refund_tx;
+    signed_refund.inputs[0].signature_script = sig_script;
+
+    verify_script(&signed_refund, &escrow_utxo)
+        .map_err(|e| bad_request(format!("verification failed: {e}")))?;
 
     // Phase 2: Submit without holding the lock.
     let rpc_tx: RpcTransaction = (&signed_refund).into();

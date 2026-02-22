@@ -6,7 +6,7 @@
 //! Requires:
 //!   - kaspad running with --rpclisten-borsh=127.0.0.1:17110 --utxoindex
 
-use kaspa_escrow_lab::api::{AppState, build_router};
+use kaspa_escrow_lab::api::{AppState, build_router, start_sweeper};
 use kaspa_wrpc_client::KaspaRpcClient;
 use kaspa_wrpc_client::prelude::*;
 use std::collections::HashMap;
@@ -42,6 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         escrows: Arc::new(Mutex::new(HashMap::new())),
     };
 
+    // Start background sweeper for auto-refund of expired escrows (every 60s).
+    let _sweeper = start_sweeper(state.clone(), std::time::Duration::from_secs(60));
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -53,8 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  POST /escrow/{{id}}/fund    Lock funds into P2SH");
     println!("  POST /escrow/{{id}}/release Release to seller");
     println!("  POST /escrow/{{id}}/refund  Timeout refund to buyer");
-    println!("  POST /escrow/{{id}}/dispute Arbitrated dispute");
-    println!("  GET  /escrow/{{id}}/script  Disassemble redeem script");
+    println!("  POST /escrow/{{id}}/dispute  Arbitrated dispute");
+    println!("  POST /escrow/{{id}}/escape   Owner escape (PaymentSplit)");
+    println!("  POST /escrow/{{id}}/compound Compound buyer UTXOs");
+    println!("  GET  /escrow/{{id}}/script   Disassemble redeem script");
+    println!();
+    println!("Background: sweeper runs every 60s to auto-refund expired escrows");
 
     axum::serve(listener, app).await?;
 
