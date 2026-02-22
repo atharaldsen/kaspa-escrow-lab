@@ -5,9 +5,10 @@
 
 use crate::sdk::{
     Branch, EscrowBuilder, EscrowConfig, EscrowPattern,
+    compound::compound_utxos,
     tx::{
-        build_dispute_tx, build_funding_tx, build_payment_split_tx, build_refund_tx,
-        build_release_tx, build_sig_script,
+        build_dispute_tx, build_escape_tx, build_funding_tx, build_payment_split_tx,
+        build_refund_tx, build_release_tx, build_sig_script,
     },
 };
 use crate::{
@@ -62,6 +63,7 @@ pub struct EscrowEntry {
     pub release_tx_id: Option<String>,
     pub refund_tx_id: Option<String>,
     pub dispute_tx_id: Option<String>,
+    pub escape_tx_id: Option<String>,
 }
 
 // ─── Request / Response DTOs ─────────────────────────────────
@@ -128,6 +130,8 @@ struct StatusResponse {
     refund_tx_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dispute_tx_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    escape_tx_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +165,28 @@ struct DisputeReq {
     fee: u64,
     #[serde(default)]
     signatures: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct EscapeReq {
+    #[serde(default = "default_fee")]
+    fee: u64,
+    #[serde(default)]
+    destination_address: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CompoundReq {
+    #[serde(default)]
+    max_inputs: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct CompoundResponse {
+    tx_ids: Vec<String>,
+    status: String,
 }
 
 #[derive(Serialize)]
@@ -256,6 +282,17 @@ fn mode_name(mode: SignerMode) -> &'static str {
     }
 }
 
+/// Check if an escrow has been settled by any action.
+fn is_settled(entry: &EscrowEntry) -> bool {
+    entry.release_tx_id.is_some()
+        || entry.refund_tx_id.is_some()
+        || entry.dispute_tx_id.is_some()
+        || entry.escape_tx_id.is_some()
+}
+
+/// Maximum fee allowed (10 KAS) to prevent overflow attacks.
+const MAX_FEE: u64 = 10_000_000_000;
+
 /// Compute the escrow status from internal state.
 fn compute_status(entry: &EscrowEntry) -> &'static str {
     if entry.release_tx_id.is_some() {
@@ -264,11 +301,24 @@ fn compute_status(entry: &EscrowEntry) -> &'static str {
         "refunded"
     } else if entry.dispute_tx_id.is_some() {
         "disputed"
+    } else if entry.escape_tx_id.is_some() {
+        "escaped"
     } else if entry.funding_tx_id.is_some() {
         "locked"
     } else {
         "awaiting_funding"
     }
+}
+
+/// Validate that a fee is within acceptable bounds.
+fn validate_fee(fee: u64) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if fee == 0 {
+        return Err(bad_request("fee must be > 0"));
+    }
+    if fee > MAX_FEE {
+        return Err(bad_request(format!("fee {fee} exceeds maximum {MAX_FEE}")));
+    }
+    Ok(())
 }
 
 /// Query for a mature UTXO at the given address.
@@ -348,6 +398,23 @@ async fn create_escrow(
         }
         other => return Err(bad_request(format!("unknown pattern: {other}"))),
     };
+
+    // Input validation
+    if req.amount == 0 {
+        return Err(bad_request("amount must be > 0"));
+    }
+    match &pattern {
+        EscrowPattern::TimeLocked { lock_time }
+        | EscrowPattern::CovenantMultiPath { lock_time }
+            if *lock_time == 0 =>
+        {
+            return Err(bad_request("lock_time must be > 0"));
+        }
+        EscrowPattern::PaymentSplit { fee_percent } if *fee_percent == 0 || *fee_percent >= 100 => {
+            return Err(bad_request("fee_percent must be between 1 and 99"));
+        }
+        _ => {}
+    }
 
     // Determine mode: if any pubkey is provided, use external; else custodial.
     // Partial external (only buyer or only seller) creates unresolvable escrows.
@@ -465,6 +532,7 @@ async fn create_escrow(
         release_tx_id: None,
         refund_tx_id: None,
         dispute_tx_id: None,
+        escape_tx_id: None,
     };
 
     state.escrows.lock().await.insert(id, entry);
@@ -497,6 +565,7 @@ async fn get_escrow(
             entry.release_tx_id.clone(),
             entry.refund_tx_id.clone(),
             entry.dispute_tx_id.clone(),
+            entry.escape_tx_id.clone(),
         )
     };
     let (
@@ -512,6 +581,7 @@ async fn get_escrow(
         release_tx_id,
         refund_tx_id,
         dispute_tx_id,
+        escape_tx_id,
     ) = snapshot;
 
     let mut current_daa = None;
@@ -559,6 +629,7 @@ async fn get_escrow(
             release_tx_id,
             refund_tx_id,
             dispute_tx_id,
+            escape_tx_id,
         }),
     ))
 }
@@ -570,6 +641,8 @@ async fn fund_escrow(
     Path(id): Path<String>,
     Json(req): Json<FundReq>,
 ) -> ApiResult<TxResponse> {
+    validate_fee(req.fee)?;
+
     // Phase 1: Lock, validate, clone what we need, drop lock before RPC.
     let (config, buyer_kp, buyer_addr, mode) = {
         let escrows = state.escrows.lock().await;
@@ -598,7 +671,9 @@ async fn fund_escrow(
     // build_funding_tx sends (utxo_amount - fee) to P2SH with no change output,
     // so any excess above escrow_amount is locked and lost to miners on release.
     let escrow_amount = config.escrow_amount;
-    let required = escrow_amount + req.fee;
+    let required = escrow_amount
+        .checked_add(req.fee)
+        .ok_or_else(|| bad_request("escrow_amount + fee overflows"))?;
     if utxo_amount < required {
         return Err(bad_request(format!(
             "UTXO amount {utxo_amount} too small: need at least {required} \
@@ -683,6 +758,8 @@ async fn release_escrow(
     Path(id): Path<String>,
     Json(req): Json<ReleaseReq>,
 ) -> ApiResult<TxResponse> {
+    validate_fee(req.fee)?;
+
     // Phase 1: Lock, validate, clone, build TX, sign — then drop lock.
     let signed_tx = {
         let escrows = state.escrows.lock().await;
@@ -693,10 +770,7 @@ async fn release_escrow(
         if entry.funding_tx_id.is_none() {
             return Err(conflict("escrow not funded yet"));
         }
-        if entry.release_tx_id.is_some()
-            || entry.refund_tx_id.is_some()
-            || entry.dispute_tx_id.is_some()
-        {
+        if is_settled(entry) {
             return Err(conflict("escrow already settled"));
         }
 
@@ -775,8 +849,8 @@ async fn release_escrow(
         let entry = escrows
             .get_mut(&id)
             .ok_or_else(|| internal("escrow disappeared"))?;
-        if entry.release_tx_id.is_some() {
-            return Err(conflict("escrow was released by a concurrent request"));
+        if is_settled(entry) {
+            return Err(conflict("escrow was settled by a concurrent request"));
         }
         entry.release_tx_id = Some(tx_id.clone());
     }
@@ -798,6 +872,8 @@ async fn refund_escrow(
     Path(id): Path<String>,
     Json(req): Json<RefundReq>,
 ) -> ApiResult<TxResponse> {
+    validate_fee(req.fee)?;
+
     // Phase 1: Lock, validate, build + sign TX, drop lock.
     let signed_refund = {
         let escrows = state.escrows.lock().await;
@@ -808,10 +884,7 @@ async fn refund_escrow(
         if entry.funding_tx_id.is_none() {
             return Err(conflict("escrow not funded yet"));
         }
-        if entry.release_tx_id.is_some()
-            || entry.refund_tx_id.is_some()
-            || entry.dispute_tx_id.is_some()
-        {
+        if is_settled(entry) {
             return Err(conflict("escrow already settled"));
         }
 
@@ -904,8 +977,8 @@ async fn refund_escrow(
         let entry = escrows
             .get_mut(&id)
             .ok_or_else(|| internal("escrow disappeared"))?;
-        if entry.refund_tx_id.is_some() {
-            return Err(conflict("escrow was refunded by a concurrent request"));
+        if is_settled(entry) {
+            return Err(conflict("escrow was settled by a concurrent request"));
         }
         entry.refund_tx_id = Some(tx_id.clone());
     }
@@ -927,6 +1000,8 @@ async fn dispute_escrow(
     Path(id): Path<String>,
     Json(req): Json<DisputeReq>,
 ) -> ApiResult<TxResponse> {
+    validate_fee(req.fee)?;
+
     let winner = match req.winner.as_str() {
         "buyer" | "seller" => req.winner.clone(),
         _ => return Err(bad_request("winner must be 'buyer' or 'seller'")),
@@ -942,10 +1017,7 @@ async fn dispute_escrow(
         if entry.funding_tx_id.is_none() {
             return Err(conflict("escrow not funded yet"));
         }
-        if entry.release_tx_id.is_some()
-            || entry.refund_tx_id.is_some()
-            || entry.dispute_tx_id.is_some()
-        {
+        if is_settled(entry) {
             return Err(conflict("escrow already settled"));
         }
 
@@ -1060,8 +1132,8 @@ async fn dispute_escrow(
         let entry = escrows
             .get_mut(&id)
             .ok_or_else(|| internal("escrow disappeared"))?;
-        if entry.dispute_tx_id.is_some() {
-            return Err(conflict("escrow was disputed by a concurrent request"));
+        if is_settled(entry) {
+            return Err(conflict("escrow was settled by a concurrent request"));
         }
         entry.dispute_tx_id = Some(tx_id.clone());
     }
@@ -1072,6 +1144,170 @@ async fn dispute_escrow(
             tx_id,
             status: "disputed".to_string(),
             winner: Some(winner),
+        }),
+    ))
+}
+
+// ─── POST /escrow/:id/escape ─────────────────────────────────
+
+async fn escape_escrow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EscapeReq>,
+) -> ApiResult<TxResponse> {
+    validate_fee(req.fee)?;
+
+    // Phase 1: Lock, validate, clone what we need, drop lock.
+    let (config, owner_kp, buyer_addr, mode, escrow_outpoint, on_chain_value) = {
+        let escrows = state.escrows.lock().await;
+        let entry = escrows
+            .get(&id)
+            .ok_or_else(|| not_found("escrow not found"))?;
+
+        if entry.funding_tx_id.is_none() {
+            return Err(conflict("escrow not funded yet"));
+        }
+        if is_settled(entry) {
+            return Err(conflict("escrow already settled"));
+        }
+
+        if !matches!(entry.config.pattern, EscrowPattern::PaymentSplit { .. }) {
+            return Err(bad_request(
+                "escape only available for payment_split pattern",
+            ));
+        }
+
+        let outpoint = entry
+            .funding_outpoint
+            .ok_or_else(|| internal("missing funding outpoint"))?;
+        let amount = entry
+            .funding_amount
+            .ok_or_else(|| internal("missing funding amount"))?;
+
+        (
+            entry.config.clone(),
+            entry.owner_kp,
+            entry.buyer_addr.clone(),
+            entry.mode,
+            outpoint,
+            amount,
+        )
+    }; // lock dropped
+
+    // Phase 2: Build TX, sign, verify, submit — no lock held.
+    let destination_spk = if let Some(ref addr_str) = req.destination_address {
+        let addr = Address::try_from(addr_str.as_str())
+            .map_err(|e| bad_request(format!("invalid destination_address: {e}")))?;
+        pay_to_address_script(&addr)
+    } else {
+        pay_to_address_script(&buyer_addr)
+    };
+
+    let escape_tx = build_escape_tx(escrow_outpoint, &config, destination_spk, req.fee)
+        .map_err(|e| bad_request(format!("{e}")))?;
+
+    let escrow_utxo = UtxoEntry::new(on_chain_value, config.p2sh_spk.clone(), 0, false, None);
+
+    let sig = if mode == SignerMode::Custodial {
+        let kp = owner_kp
+            .as_ref()
+            .ok_or_else(|| internal("no owner keypair in custodial mode"))?;
+        schnorr_sign(&escape_tx, &escrow_utxo, kp)
+    } else {
+        let sig_hex = req
+            .signature
+            .as_ref()
+            .ok_or_else(|| bad_request("signature required in external mode"))?;
+        parse_hex_sig(sig_hex).map_err(bad_request)?
+    };
+
+    let sig_script = build_sig_script(
+        &Branch::OwnerEscape,
+        &[sig],
+        &config.redeem_script,
+        &config.pattern,
+    )
+    .map_err(|e| bad_request(format!("{e}")))?;
+
+    let mut tx = escape_tx;
+    tx.inputs[0].signature_script = sig_script;
+
+    verify_script(&tx, &escrow_utxo)
+        .map_err(|e| bad_request(format!("verification failed: {e}")))?;
+
+    let rpc_tx: RpcTransaction = (&tx).into();
+    let tx_id = submit_with_retry(&state.client, rpc_tx)
+        .await
+        .map_err(internal)?;
+
+    // Phase 3: Re-lock to update state.
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows
+            .get_mut(&id)
+            .ok_or_else(|| internal("escrow disappeared"))?;
+        if is_settled(entry) {
+            return Err(conflict("escrow was settled by a concurrent request"));
+        }
+        entry.escape_tx_id = Some(tx_id.clone());
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(TxResponse {
+            tx_id,
+            status: "escaped".to_string(),
+            winner: None,
+        }),
+    ))
+}
+
+// ─── POST /escrow/:id/compound ───────────────────────────────
+
+async fn compound_escrow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CompoundReq>,
+) -> ApiResult<CompoundResponse> {
+    // Lock, validate, extract buyer info, drop lock.
+    let (buyer_kp, buyer_addr) = {
+        let escrows = state.escrows.lock().await;
+        let entry = escrows
+            .get(&id)
+            .ok_or_else(|| not_found("escrow not found"))?;
+
+        if entry.funding_tx_id.is_some() {
+            return Err(conflict("escrow already funded, compounding not needed"));
+        }
+        if entry.mode != SignerMode::Custodial {
+            return Err(bad_request(
+                "compounding only available in custodial mode (requires buyer keypair)",
+            ));
+        }
+
+        let kp = entry
+            .buyer_kp
+            .ok_or_else(|| internal("no buyer keypair in custodial mode"))?;
+
+        (kp, entry.buyer_addr.clone())
+    }; // lock dropped
+
+    let max_inputs = req.max_inputs.unwrap_or(0);
+    let tx_ids = compound_utxos(&state.client, &buyer_addr, &buyer_kp, max_inputs)
+        .await
+        .map_err(|e| internal(format!("{e}")))?;
+
+    let status = if tx_ids.is_empty() {
+        "no_utxos_to_compound".to_string()
+    } else {
+        format!("compounded {} transaction(s)", tx_ids.len())
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(CompoundResponse {
+            tx_ids: tx_ids.iter().map(|id| format!("{id}")).collect(),
+            status,
         }),
     ))
 }
@@ -1107,6 +1343,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/escrow/{id}/release", post(release_escrow))
         .route("/escrow/{id}/refund", post(refund_escrow))
         .route("/escrow/{id}/dispute", post(dispute_escrow))
+        .route("/escrow/{id}/escape", post(escape_escrow))
+        .route("/escrow/{id}/compound", post(compound_escrow))
         .route("/escrow/{id}/script", get(get_script))
         .with_state(state)
 }

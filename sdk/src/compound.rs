@@ -34,6 +34,10 @@ pub async fn compound_utxos(
 ) -> Result<Vec<TransactionId>, EscrowError> {
     let max_inputs = if max_inputs_per_tx == 0 {
         50
+    } else if max_inputs_per_tx > 500 {
+        return Err(EscrowError::InvalidConfig(
+            "max_inputs_per_tx cannot exceed 500".into(),
+        ));
     } else {
         max_inputs_per_tx
     };

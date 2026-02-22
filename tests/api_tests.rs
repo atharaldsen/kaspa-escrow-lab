@@ -121,6 +121,7 @@ async fn insert_funded_escrow(state: &AppState, pattern: EscrowPattern) -> Strin
         release_tx_id: None,
         refund_tx_id: None,
         dispute_tx_id: None,
+        escape_tx_id: None,
     };
 
     state.escrows.lock().await.insert(id.clone(), entry);
@@ -402,4 +403,162 @@ async fn fund_already_funded() {
     let (status, json) = post_json(app, &format!("/escrow/{id}/fund"), r#"{"fee":5000}"#).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(json["error"].as_str().unwrap().contains("already funded"));
+}
+
+// ─── Escape endpoint tests ──────────────────────────────────
+
+#[tokio::test]
+async fn escape_not_found() {
+    let (status, json) =
+        post_json(test_app(), "/escrow/nonexistent/escape", r#"{"fee":5000}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(json["error"].as_str().unwrap().contains("not found"));
+}
+
+#[tokio::test]
+async fn escape_not_funded() {
+    let state = test_state();
+    let (_, created) = create_escrow(
+        &state,
+        r#"{"pattern":"payment_split","amount":1000000,"fee_percent":5}"#,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/escape"), r#"{"fee":5000}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(json["error"].as_str().unwrap().contains("not funded"));
+}
+
+#[tokio::test]
+async fn escape_wrong_pattern() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/escape"), r#"{"fee":5000}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("only available for payment_split")
+    );
+}
+
+#[tokio::test]
+async fn escape_already_settled() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::PaymentSplit { fee_percent: 5 }).await;
+
+    // Simulate an already-escaped escrow
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.escape_tx_id = Some("already-escaped-tx".to_string());
+    }
+
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/escape"), r#"{"fee":5000}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(json["error"].as_str().unwrap().contains("already settled"));
+}
+
+// ─── Compound endpoint tests ────────────────────────────────
+
+#[tokio::test]
+async fn compound_not_found() {
+    let (status, json) = post_json(test_app(), "/escrow/nonexistent/compound", r#"{}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(json["error"].as_str().unwrap().contains("not found"));
+}
+
+#[tokio::test]
+async fn compound_already_funded() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/compound"), r#"{}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(json["error"].as_str().unwrap().contains("already funded"));
+}
+
+#[tokio::test]
+async fn compound_external_mode() {
+    let state = test_state();
+    // Create escrow with external pubkeys (both buyer and seller)
+    let dummy_pk = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
+    let body = format!(
+        r#"{{"pattern":"basic","amount":1000000,"buyer_pk":"{}","seller_pk":"{}"}}"#,
+        dummy_pk, dummy_pk
+    );
+    let (status, created) = create_escrow(&state, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
+
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/compound"), r#"{}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["error"].as_str().unwrap().contains("custodial mode"));
+}
+
+// ─── Input validation tests ─────────────────────────────────
+
+#[tokio::test]
+async fn create_zero_amount() {
+    let (status, json) =
+        post_json(test_app(), "/escrow", r#"{"pattern":"basic","amount":0}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("amount must be > 0")
+    );
+}
+
+#[tokio::test]
+async fn create_timelocked_zero_lock_time() {
+    let (status, json) = post_json(
+        test_app(),
+        "/escrow",
+        r#"{"pattern":"timelocked","amount":1000000,"lock_time":0}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("lock_time must be > 0")
+    );
+}
+
+#[tokio::test]
+async fn fee_too_large() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    let app = build_router(state);
+    let (status, json) = post_json(
+        app,
+        &format!("/escrow/{id}/release"),
+        r#"{"fee":99999999999}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["error"].as_str().unwrap().contains("exceeds maximum"));
+}
+
+#[tokio::test]
+async fn fee_zero() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    let app = build_router(state);
+    let (status, json) = post_json(app, &format!("/escrow/{id}/release"), r#"{"fee":0}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["error"].as_str().unwrap().contains("fee must be > 0"));
 }

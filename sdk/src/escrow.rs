@@ -178,6 +178,12 @@ impl EscrowBuilder {
                 seller_amount = (escrow_amount * (100 - fee_percent)) / 100;
                 fee_amount = escrow_amount - seller_amount;
 
+                if seller_amount == 0 {
+                    return Err(EscrowError::InvalidConfig(
+                        "escrow amount too small: seller would receive 0".into(),
+                    ));
+                }
+
                 let seller_spk = p2pk_spk(&seller_pk);
                 let seller_spk_bytes = spk_to_bytes(&seller_spk);
                 let fee_spk = p2pk_spk(&fee_pk);

@@ -166,6 +166,25 @@ mod builder_validation {
     }
 
     #[test]
+    fn payment_split_seller_gets_zero_fails() {
+        // fee_percent=99, amount=1 → seller_amount = (1 * 1) / 100 = 0
+        let result = EscrowBuilder::new(EscrowPattern::PaymentSplit { fee_percent: 99 })
+            .buyer(dummy_pk())
+            .seller(dummy_pk())
+            .owner(dummy_pk())
+            .fee_address(dummy_pk())
+            .amount(1)
+            .build();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("seller would receive 0")
+        );
+    }
+
+    #[test]
     fn lock_time_exceeds_threshold_fails() {
         let result = EscrowBuilder::new(EscrowPattern::TimeLocked {
             lock_time: 500_000_000_000,
