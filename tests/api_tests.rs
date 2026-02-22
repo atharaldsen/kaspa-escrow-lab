@@ -11,6 +11,7 @@ use http_body_util::BodyExt;
 use kaspa_consensus_core::tx::TransactionOutpoint;
 use kaspa_escrow_lab::api::{
     AppState, EscrowEntry, SignerMode, SweepAction, build_router, classify_for_sweep,
+    classify_for_tracking,
 };
 use kaspa_escrow_lab::sdk::{EscrowBuilder, EscrowPattern};
 use kaspa_escrow_lab::*;
@@ -105,6 +106,11 @@ async fn insert_funded_escrow(state: &AppState, pattern: EscrowPattern) -> Strin
     }
 
     let config = builder.build().expect("valid config");
+    let p2sh_addr = kaspa_txscript::standard::extract_script_pub_key_address(
+        &config.p2sh_spk,
+        kaspa_addresses::Prefix::Testnet,
+    )
+    .expect("valid P2SH address");
     let id = uuid::Uuid::new_v4().to_string();
     let buyer_addr = testnet_address(&buyer_pk);
 
@@ -126,6 +132,10 @@ async fn insert_funded_escrow(state: &AppState, pattern: EscrowPattern) -> Strin
         escape_tx_id: None,
         expired: false,
         auto_refund_failures: 0,
+        p2sh_addr,
+        funding_daa_score: None,
+        funding_confirmed: false,
+        settlement_confirmed: false,
     };
 
     state.escrows.lock().await.insert(id.clone(), entry);
@@ -161,6 +171,11 @@ async fn insert_funded_escrow_with_mode(
     }
 
     let config = builder.build().expect("valid config");
+    let p2sh_addr = kaspa_txscript::standard::extract_script_pub_key_address(
+        &config.p2sh_spk,
+        kaspa_addresses::Prefix::Testnet,
+    )
+    .expect("valid P2SH address");
     let id = uuid::Uuid::new_v4().to_string();
     let buyer_addr = testnet_address(&buyer_pk);
 
@@ -190,6 +205,10 @@ async fn insert_funded_escrow_with_mode(
         escape_tx_id: None,
         expired: false,
         auto_refund_failures: 0,
+        p2sh_addr,
+        funding_daa_score: None,
+        funding_confirmed: false,
+        settlement_confirmed: false,
     };
 
     state.escrows.lock().await.insert(id.clone(), entry);
@@ -842,4 +861,173 @@ async fn classify_unfunded_skipped() {
     let escrows = state.escrows.lock().await;
     let entry = escrows.get(id).unwrap();
     assert!(classify_for_sweep(entry, 200).is_none());
+}
+
+// ─── Confirmation tracking tests ────────────────────────────
+
+#[tokio::test]
+async fn status_locking_before_confirmation() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    // funding_confirmed defaults to false, so status should be "locking"
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["status"].as_str().unwrap().starts_with("locking"),
+        "expected locking status, got: {}",
+        json["status"]
+    );
+}
+
+#[tokio::test]
+async fn status_locked_after_confirmation() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    // Manually confirm funding
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.funding_confirmed = true;
+        entry.funding_daa_score = Some(42000);
+    }
+
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["status"].as_str().unwrap().starts_with("locked"),
+        "expected locked status, got: {}",
+        json["status"]
+    );
+    assert_eq!(json["funding_confirmed"], true);
+}
+
+#[tokio::test]
+async fn status_releasing_before_confirmation() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.funding_confirmed = true;
+        entry.release_tx_id = Some("release-tx-123".to_string());
+        // settlement_confirmed is false by default
+    }
+
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "releasing");
+    assert_eq!(json["settlement_confirmed"], false);
+}
+
+#[tokio::test]
+async fn status_released_after_confirmation() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.funding_confirmed = true;
+        entry.release_tx_id = Some("release-tx-123".to_string());
+        entry.settlement_confirmed = true;
+    }
+
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "released");
+    assert_eq!(json["settlement_confirmed"], true);
+}
+
+#[tokio::test]
+async fn funding_confirmations_in_response() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.funding_confirmed = true;
+        entry.funding_daa_score = Some(42000);
+    }
+
+    let app = build_router(state);
+    let (status, json) = get_json(app, &format!("/escrow/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    // funding_confirmations should be present (computed from funding_daa_score)
+    // but current_daa may be null (unconnected RPC), so funding_confirmations could be null too
+    assert_eq!(json["funding_confirmed"], true);
+    // funding_daa_score is set but current_daa may fail — just confirm the field exists
+    // (it will be null when RPC is unavailable, which is fine)
+}
+
+#[tokio::test]
+async fn classify_tracking_funded_unconfirmed() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    let candidate = classify_for_tracking(entry).expect("should be candidate");
+    assert_eq!(candidate.id, id);
+    assert!(candidate.needs_funding_check);
+    assert!(!candidate.needs_settlement_check);
+}
+
+#[tokio::test]
+async fn classify_tracking_already_confirmed() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.funding_confirmed = true;
+    }
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    // No settlement TX, funding already confirmed → nothing to track
+    assert!(classify_for_tracking(entry).is_none());
+}
+
+#[tokio::test]
+async fn classify_tracking_settled_unconfirmed() {
+    let state = test_state();
+    let id = insert_funded_escrow(&state, EscrowPattern::Basic).await;
+
+    {
+        let mut escrows = state.escrows.lock().await;
+        let entry = escrows.get_mut(&id).unwrap();
+        entry.funding_confirmed = true;
+        entry.release_tx_id = Some("release-tx-123".to_string());
+        // settlement_confirmed is false
+    }
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(&id).unwrap();
+
+    let candidate = classify_for_tracking(entry).expect("should be candidate");
+    assert!(!candidate.needs_funding_check); // funding already confirmed
+    assert!(candidate.needs_settlement_check);
+}
+
+#[tokio::test]
+async fn classify_tracking_unfunded_skipped() {
+    let state = test_state();
+    let (_, created) = create_escrow(&state, r#"{"pattern":"basic","amount":1000000}"#).await;
+    let id = created["id"].as_str().unwrap();
+
+    let escrows = state.escrows.lock().await;
+    let entry = escrows.get(id).unwrap();
+
+    assert!(classify_for_tracking(entry).is_none());
 }

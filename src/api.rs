@@ -21,10 +21,11 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use kaspa_addresses::Address;
+use kaspa_addresses::{Address, Prefix};
 use kaspa_consensus_core::tx::{TransactionOutpoint, UtxoEntry};
 use kaspa_rpc_core::RpcTransaction;
 use kaspa_txscript::pay_to_address_script;
+use kaspa_txscript::standard::extract_script_pub_key_address;
 use kaspa_wrpc_client::KaspaRpcClient;
 use kaspa_wrpc_client::prelude::RpcApi;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,10 @@ pub struct EscrowEntry {
     pub escape_tx_id: Option<String>,
     pub expired: bool,
     pub auto_refund_failures: u32,
+    pub p2sh_addr: Address,
+    pub funding_daa_score: Option<u64>,
+    pub funding_confirmed: bool,
+    pub settlement_confirmed: bool,
 }
 
 // ─── Request / Response DTOs ─────────────────────────────────
@@ -135,6 +140,10 @@ struct StatusResponse {
     escape_tx_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_at_daa: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    funding_confirmations: Option<u64>,
+    funding_confirmed: bool,
+    settlement_confirmed: bool,
 }
 
 #[derive(Deserialize)]
@@ -297,19 +306,43 @@ fn is_settled(entry: &EscrowEntry) -> bool {
 const MAX_FEE: u64 = 10_000_000_000;
 
 /// Compute the escrow status from internal state.
+///
+/// Transitional states (`locking`, `releasing`, etc.) indicate a TX has been
+/// submitted but not yet confirmed on-chain.  Terminal states (`locked`,
+/// `released`, etc.) mean the TX has been observed in the UTXO set.
 fn compute_status(entry: &EscrowEntry) -> &'static str {
     if entry.release_tx_id.is_some() {
-        "released"
+        if entry.settlement_confirmed {
+            "released"
+        } else {
+            "releasing"
+        }
     } else if entry.refund_tx_id.is_some() {
-        "refunded"
+        if entry.settlement_confirmed {
+            "refunded"
+        } else {
+            "refunding"
+        }
     } else if entry.dispute_tx_id.is_some() {
-        "disputed"
+        if entry.settlement_confirmed {
+            "disputed"
+        } else {
+            "disputing"
+        }
     } else if entry.escape_tx_id.is_some() {
-        "escaped"
+        if entry.settlement_confirmed {
+            "escaped"
+        } else {
+            "escaping"
+        }
     } else if entry.expired {
         "expired"
     } else if entry.funding_tx_id.is_some() {
-        "locked"
+        if entry.funding_confirmed {
+            "locked"
+        } else {
+            "locking"
+        }
     } else {
         "awaiting_funding"
     }
@@ -358,6 +391,7 @@ async fn submit_with_retry(
     rpc_tx: RpcTransaction,
 ) -> Result<String, String> {
     let max_retries = 20;
+    let mut last_err = String::new();
     for attempt in 1..=max_retries {
         match client.submit_transaction(rpc_tx.clone(), false).await {
             Ok(id) => return Ok(format!("{id}")),
@@ -365,13 +399,16 @@ async fn submit_with_retry(
                 let msg = format!("{e}");
                 if msg.contains("not finalized") && attempt < max_retries {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    last_err = msg;
                     continue;
                 }
                 return Err(format!("TX rejected after {attempt} attempts: {e}"));
             }
         }
     }
-    unreachable!()
+    Err(format!(
+        "TX not finalized after {max_retries} attempts: {last_err}"
+    ))
 }
 
 // ─── Sweeper ────────────────────────────────────────────────
@@ -615,6 +652,91 @@ async fn increment_failure_count(state: &AppState, id: &str) {
     }
 }
 
+// ─── Confirmation Tracker ────────────────────────────────────
+
+/// Data extracted from an EscrowEntry for confirmation checking outside the lock.
+pub struct ConfirmationCandidate {
+    pub id: String,
+    pub p2sh_addr: Address,
+    pub funding_outpoint: Option<TransactionOutpoint>,
+    pub needs_funding_check: bool,
+    pub needs_settlement_check: bool,
+}
+
+/// Classify an escrow entry for confirmation tracking. Returns None if no check needed.
+pub fn classify_for_tracking(entry: &EscrowEntry) -> Option<ConfirmationCandidate> {
+    // Must be funded to have anything to track.
+    entry.funding_tx_id.as_ref()?;
+
+    let needs_funding = !entry.funding_confirmed;
+    let needs_settlement = is_settled(entry) && !entry.settlement_confirmed;
+
+    if !needs_funding && !needs_settlement {
+        return None; // Both already confirmed
+    }
+
+    Some(ConfirmationCandidate {
+        id: entry.id.clone(),
+        p2sh_addr: entry.p2sh_addr.clone(),
+        funding_outpoint: entry.funding_outpoint,
+        needs_funding_check: needs_funding,
+        needs_settlement_check: needs_settlement,
+    })
+}
+
+/// Run a single confirmation-tracking pass across all escrows.
+pub async fn track_confirmations(state: &AppState) {
+    // Phase 1: Collect candidates under lock, then drop.
+    let candidates: Vec<ConfirmationCandidate> = {
+        let escrows = state.escrows.lock().await;
+        escrows.values().filter_map(classify_for_tracking).collect()
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Phase 2: Query UTXO set for each candidate (no lock held).
+    for candidate in &candidates {
+        let utxos = match state
+            .client
+            .get_utxos_by_addresses(vec![candidate.p2sh_addr.clone()])
+            .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!(
+                    "[tracker] RPC error checking UTXOs for {}: {e}",
+                    candidate.id
+                );
+                continue;
+            }
+        };
+
+        // Find matching UTXO by outpoint.
+        let matching = candidate.funding_outpoint.and_then(|op| {
+            utxos.iter().find(|u| {
+                u.outpoint.transaction_id == op.transaction_id && u.outpoint.index == op.index
+            })
+        });
+
+        // Phase 3: Re-lock and update.
+        let mut escrows = state.escrows.lock().await;
+        if let Some(entry) = escrows.get_mut(&candidate.id) {
+            if candidate.needs_funding_check
+                && let Some(utxo) = matching
+            {
+                entry.funding_confirmed = true;
+                entry.funding_daa_score = Some(utxo.utxo_entry.block_daa_score);
+            }
+            if candidate.needs_settlement_check && matching.is_none() {
+                // P2SH UTXO is gone — settlement TX consumed it.
+                entry.settlement_confirmed = true;
+            }
+        }
+    }
+}
+
 /// Start the background sweeper loop.
 pub fn start_sweeper(
     state: AppState,
@@ -627,7 +749,11 @@ pub fn start_sweeper(
             // Clone state (cheap — Arc internals) so spawned task is 'static.
             // This catches panics so the sweeper survives unexpected errors.
             let s = state.clone();
-            let result = tokio::task::spawn(async move { sweep_expired_escrows(&s).await }).await;
+            let result = tokio::task::spawn(async move {
+                sweep_expired_escrows(&s).await;
+                track_confirmations(&s).await;
+            })
+            .await;
             if let Err(e) = result {
                 eprintln!("[sweeper] Sweep pass panicked: {e}");
             }
@@ -762,6 +888,9 @@ async fn create_escrow(
 
     let config = builder.build().map_err(|e| bad_request(format!("{e}")))?;
 
+    let p2sh_addr = extract_script_pub_key_address(&config.p2sh_spk, Prefix::Testnet)
+        .map_err(|e| internal(format!("P2SH address derivation failed: {e}")))?;
+
     let id = Uuid::new_v4().to_string();
     let buyer_addr = testnet_address(&buyer_pk);
     let funding_address = format!("{}", buyer_addr);
@@ -801,6 +930,10 @@ async fn create_escrow(
         escape_tx_id: None,
         expired: false,
         auto_refund_failures: 0,
+        p2sh_addr,
+        funding_daa_score: None,
+        funding_confirmed: false,
+        settlement_confirmed: false,
     };
 
     state.escrows.lock().await.insert(id, entry);
@@ -815,7 +948,27 @@ async fn get_escrow(
     Path(id): Path<String>,
 ) -> ApiResult<StatusResponse> {
     // Snapshot entry data under lock, then drop before RPC calls.
-    let snapshot = {
+    let (
+        eid,
+        mut status,
+        buyer_addr,
+        escrow_amount,
+        pattern,
+        buyer_pk,
+        seller_pk,
+        mut utxo_amount,
+        funding_tx_id,
+        release_tx_id,
+        refund_tx_id,
+        dispute_tx_id,
+        escape_tx_id,
+        expires_at_daa,
+        p2sh_addr,
+        funding_outpoint,
+        mut funding_daa_score,
+        mut funding_confirmed,
+        settlement_confirmed,
+    ) = {
         let escrows = state.escrows.lock().await;
         let entry = escrows
             .get(&id)
@@ -840,24 +993,13 @@ async fn get_escrow(
             entry.dispute_tx_id.clone(),
             entry.escape_tx_id.clone(),
             expires_at_daa,
+            entry.p2sh_addr.clone(),
+            entry.funding_outpoint,
+            entry.funding_daa_score,
+            entry.funding_confirmed,
+            entry.settlement_confirmed,
         )
     };
-    let (
-        eid,
-        mut status,
-        buyer_addr,
-        escrow_amount,
-        pattern,
-        buyer_pk,
-        seller_pk,
-        mut utxo_amount,
-        funding_tx_id,
-        release_tx_id,
-        refund_tx_id,
-        dispute_tx_id,
-        escape_tx_id,
-        expires_at_daa,
-    ) = snapshot;
 
     let mut current_daa = None;
     let mut rpc_error = None;
@@ -883,13 +1025,41 @@ async fn get_escrow(
         }
     }
 
+    // Opportunistic confirmation check: if funded but not yet confirmed,
+    // query the P2SH address for the escrow UTXO.
+    if status == "locking"
+        && !funding_confirmed
+        && rpc_error.is_none()
+        && let Ok(utxos) = state.client.get_utxos_by_addresses(vec![p2sh_addr]).await
+        && let Some(matching) = utxos.iter().find(|u| {
+            funding_outpoint.is_some_and(|op| {
+                u.outpoint.transaction_id == op.transaction_id && u.outpoint.index == op.index
+            })
+        })
+    {
+        funding_confirmed = true;
+        funding_daa_score = Some(matching.utxo_entry.block_daa_score);
+        status = "locked".to_string();
+        // Persist the confirmation (brief re-lock)
+        let mut escrows = state.escrows.lock().await;
+        if let Some(entry) = escrows.get_mut(&eid) {
+            entry.funding_confirmed = true;
+            entry.funding_daa_score = Some(matching.utxo_entry.block_daa_score);
+        }
+    }
+
     // If the only thing we tried was RPC and it failed, report it
     if status == "awaiting_funding" && rpc_error.is_some() {
         status = "awaiting_funding (node unreachable)".to_string();
     }
-    if status == "locked" && rpc_error.is_some() {
-        status = "locked (node unreachable)".to_string();
+    if (status == "locked" || status == "locking") && rpc_error.is_some() {
+        status = format!("{} (node unreachable)", status);
     }
+
+    let funding_confirmations = match (funding_daa_score, current_daa) {
+        (Some(daa), Some(current)) => Some(current.saturating_sub(daa)),
+        _ => None,
+    };
 
     Ok((
         StatusCode::OK,
@@ -909,6 +1079,9 @@ async fn get_escrow(
             dispute_tx_id,
             escape_tx_id,
             expires_at_daa,
+            funding_confirmations,
+            funding_confirmed,
+            settlement_confirmed,
         }),
     ))
 }
@@ -1017,7 +1190,11 @@ async fn fund_escrow(
         }
         entry.funding_tx_id = Some(tx_id.clone());
         entry.funding_outpoint = Some(funding_outpoint);
-        entry.funding_amount = Some(utxo_amount - req.fee);
+        entry.funding_amount = Some(
+            utxo_amount
+                .checked_sub(req.fee)
+                .ok_or_else(|| internal("funding amount underflow"))?,
+        );
     }
 
     Ok((
@@ -1583,7 +1760,7 @@ async fn compound_escrow(
         (kp, entry.buyer_addr.clone())
     }; // lock dropped
 
-    let max_inputs = req.max_inputs.unwrap_or(0);
+    let max_inputs = req.max_inputs.unwrap_or(0).min(500);
     let tx_ids = compound_utxos(&state.client, &buyer_addr, &buyer_kp, max_inputs)
         .await
         .map_err(|e| internal(format!("{e}")))?;
@@ -1609,17 +1786,20 @@ async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<ScriptResponse> {
-    let escrows = state.escrows.lock().await;
-    let entry = escrows
-        .get(&id)
-        .ok_or_else(|| not_found("escrow not found"))?;
+    let redeem_script = {
+        let escrows = state.escrows.lock().await;
+        let entry = escrows
+            .get(&id)
+            .ok_or_else(|| not_found("escrow not found"))?;
+        entry.config.redeem_script.clone()
+    };
 
     Ok((
         StatusCode::OK,
         Json(ScriptResponse {
-            redeem_script_hex: hex::encode(&entry.config.redeem_script),
-            disassembly: disassemble_script(&entry.config.redeem_script),
-            length: entry.config.redeem_script.len(),
+            redeem_script_hex: hex::encode(&redeem_script),
+            disassembly: disassemble_script(&redeem_script),
+            length: redeem_script.len(),
         }),
     ))
 }
